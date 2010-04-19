@@ -1,0 +1,15 @@
+mysql plugins structure.
+
+two ways to init the plugins:
+    1. in mysqld.cc, plugin_init()
+    2. in sql_parse.cc, when execute the 'INSTALL PLUGIN' command, mysql_install_plugin()
+    
+    they both call plugin_initialize() to initialize the plugin, then will call the initialize method pointor of ha_initialize_handlerton() in plugin_type_initialize[] array.
+    in the ha_initialize_handlerton(), will call the initialize method in st_mysql_plugin structure.
+
+also two ways to deinitialize the plugins:
+    1. in mysqld.cc, plugin_shutdown()
+    2. in sql_parse.cc, when execute the 'UNINSTALL PLUGIN' command, mysql_install_plugin()
+    
+    they both call plugin_deinitialize() to deinitialize the plugin, then will call the deinitialize method pointor of ha_finalize_handlerton() in plugin_type_deinitialize[] array.
+    in the ha_finalize_handlerton(), will call the deinitialize method in st_mysql_plugin structure.   

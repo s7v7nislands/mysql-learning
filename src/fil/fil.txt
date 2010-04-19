@@ -1,0 +1,172 @@
+innodb fil
+
+Tips: 
+    the defined struct means data struct in memory. 
+    the define macor means data struct in physical file.
+    
+    Tablespace -> File(fil_node) -> Segment -> Extent -> Page -> Record
+
+fil/fil0fil.c
+
+        IMPLEMENTATION OF THE TABLESPACE MEMORY CACHE
+        =============================================
+
+The tablespace cache is responsible for providing fast read/write access to
+tablespaces and logs of the database. File creation and deletion is done
+in other modules which know more of the logic of the operation, however.
+
+A tablespace consists of a chain of files. The size of the files does not
+have to be divisible by the database block size, because we may just leave
+the last incomplete block unused. When a new file is appended to the
+tablespace, the maximum size of the file is also specified. At the moment,
+we think that it is best to extend the file to its maximum size already at
+the creation of the file, because then we can avoid dynamically extending
+the file when more space is needed for the tablespace.
+
+A block's position in the tablespace is specified with a 32-bit unsigned
+integer. The files in the chain are thought to be catenated, and the block
+corresponding to an address n is the nth block in the catenated file (where
+the first block is named the 0th block, and the incomplete block fragments
+at the end of files are not taken into account). A tablespace can be extended
+by appending a new file at the end of the chain.
+
+Our tablespace concept is similar to the one of Oracle. 
+
+To have fast access to a tablespace or a log file, we put the data structures
+to a hash table. Each tablespace and log file is given an unique 32-bit
+identifier.
+
+/* File node of a tablespace or the log data space */
+struct fil_node_struct {
+    fil_space_t*    space;                  /* backpointer to the space where this node belongs */
+    char*           name;                   /* path to the file */
+    ibool           open;                   /* TRUE if file open */
+    os_file_t       handle;                 /* OS handle to the file, if file open */
+    ibool           is_raw_disk;            /* TRUE if the 'file' is actually a raw device or a raw disk partition */
+    ulint           size;                   /* size of the file in database pages, 0 if not known yet; the possible last incomplete megabyte may be ignored if space == 0 */
+    ulint           n_pending;              /* count of pending i/o's on this file; closing of the file is not allowed if this is > 0 */
+    ulint           n_pending_flushes;      /* count of pending flushes on this file; closing of the file is not allowed if this is > 0 */
+    ib_longlong     modification_counter;   /* when we write to the file we increment this by one */
+    ib_longlong     flush_counter;          /* up to what modification_counter value we have flushed the modifications to disk */
+    UT_LIST_NODE_T(fil_node_t) chain;       /* link field for the file chain */
+    UT_LIST_NODE_T(fil_node_t) LRU;         /* link field for the LRU list */
+    ulint           magic_n;                /* #define FIL_NODE_MAGIC_N    89389 */
+};
+
+
+/* Tablespace or log data space: let us call them by a common name space */
+struct fil_space_struct {
+    char*       name;                       /* space name = the path to the first file in it */
+    ulint       id;                         /* space id */
+    ib_longlong tablespace_version;         /* in DISCARD/IMPORT this timestamp is used to check if we should ignore an insert buffer merge request for a page because it actually was for the previous incarnation of the space */
+    ibool       mark;                       /* this is set to TRUE at database startup if the space corresponds to a table in the InnoDB data dictionary; so we can print a warning of orphaned tablespaces */
+    ibool       stop_ios;                   /* TRUE if we want to rename the .ibd file of tablespace and want to stop temporarily posting of new i/o requests on the file */
+    ibool       stop_ibuf_merges;           /* we set this TRUE when we start deleting a single-table tablespace */
+    ibool       is_being_deleted;           /* this is set to TRUE when we start deleting a single-table tablespace and its file; when this flag is set no further i/o or flush requests can be placed on this space, though there may be such requests still being processed on this space */
+    ulint       purpose;                    /* FIL_TABLESPACE, FIL_LOG, or FIL_ARCH_LOG */
+    UT_LIST_BASE_NODE_T(fil_node_t) chain;  /* base node for the file chain */
+    ulint       size;                       /* space size in pages; 0 if a single-table tablespace whose size we do not know yet; last incomplete megabytes in data files may be ignored if space == 0 */
+    ulint       n_reserved_extents;         /* number of reserved free extents for ongoing operations like B-tree page split */
+    ulint       n_pending_flushes;          /* this is > 0 when flushing the tablespace to disk; dropping of the tablespace is forbidden if this is > 0 */
+    ulint       n_pending_ibuf_merges;      /* this is > 0 when merging insert buffer entries to a page so that we may need to access the ibuf bitmap page in the tablespade: dropping of the tablespace is forbidden if this is > 0 */
+    hash_node_t hash;                       /* hash chain node */
+    hash_node_t name_hash;                  /* hash chain the name_hash table */
+    rw_lock_t   latch;                              /* latch protecting the file space storage allocation */
+    UT_LIST_NODE_T(fil_space_t) unflushed_spaces;   /* list of spaces with at least one unflushed file we have written to */
+    ibool       is_in_unflushed_spaces;             /* TRUE if this space is currently in the list above */
+    UT_LIST_NODE_T(fil_space_t) space_list;         /* list of all spaces */
+    ibuf_data_t*    ibuf_data;                      /* insert buffer data */
+    ulint           magic_n;                        /* #define FIL_SPACE_MAGIC_N   89472 */
+};
+
+/* The tablespace memory cache; also the totality of logs = the log data space, is stored here; below we talk about tablespaces, but also the ib_logfiles form a 'space' and it is handled here */
+
+typedef struct fil_system_struct    fil_system_t;
+struct fil_system_struct {
+    mutex_t         mutex;                              /* The mutex protecting the cache */
+    hash_table_t*   spaces;                             /* The hash table of spaces in the system; they are hashed on the space id */
+    hash_table_t*   name_hash;                          /* hash table based on the space name */
+    UT_LIST_BASE_NODE_T(fil_node_t) LRU;                /* base node for the LRU list of the most recently used open files with no pending i/o's; if we start an i/o on the file, we first remove it from this list, and return it to the start of the list when the i/o ends; log files and the system tablespace are not put to this list: they are opened after the startup, and kept open until shutdown */
+    UT_LIST_BASE_NODE_T(fil_space_t) unflushed_spaces;  /* base node for the list of those tablespaces whose files contain unflushed writes; those spaces have at least one file node where modification_counter > flush_counter */
+    ulint           n_open;                             /* number of files currently open */
+    ulint           max_n_open;                         /* n_open is not allowed to exceed this */
+    ib_longlong     modification_counter;               /* when we write to a file we increment this by one */
+    ulint           max_assigned_id;                    /* maximum space id in the existing tables, or assigned during the time mysqld has been up; at an InnoDB startup we scan the data dictionary and set here the maximum of the space id's of the tables there */
+    ib_longlong     tablespace_version;                 /* a counter which is incremented for every space object memory creation; every space mem object gets a 'timestamp' from this; in DISCARD/IMPORT this is used to check if we should ignore an insert buffer merge request */
+    UT_LIST_BASE_NODE_T(fil_space_t) space_list;        /* list of all file spaces */
+};
+/* The tablespace memory cache. This variable is NULL before the module is initialized. */
+fil_system_t*   fil_system  = NULL;
+
+
+
+
+include/fil0fil.h
+
+/* Space address data type; this is intended to be used when
+addresses accurate to a byte are stored in file pages. If the page part
+of the address is FIL_NULL, the address is considered undefined. */
+
+typedef byte    fil_faddr_t;    /* 'type' definition in C: an address stored in a file page is a string of bytes */
+                
+#define FIL_ADDR_PAGE   0   /* first in address is the page offset */
+#define FIL_ADDR_BYTE   4   /* then comes 2-byte byte offset within page*/
+
+#define FIL_ADDR_SIZE   6   /* address size is 6 bytes */
+
+/* A struct for storing a space address FIL_ADDR, when it is used in C program data structures. */
+
+typedef struct fil_addr_struct  fil_addr_t;
+struct fil_addr_struct{
+    ulint   page;       /* page number within a space */
+    ulint   boffset;    /* byte offset within the page */
+};
+
+
+/* File page header */
+/* The byte offsets on a file page for various variables */
+#define FIL_PAGE_SPACE_OR_CHKSUM            0   /* in < MySQL-4.0.14 space id the page belongs to (== 0) but in later versions the 'new' checksum of the page */
+#define FIL_PAGE_OFFSET                     4   /* page offset inside space */
+#define FIL_PAGE_PREV                       8   /* if there is a 'natural' predecessor of the page, its offset. Otherwise FIL_NULL. This field is not set on BLOB pages, which are stored as a singly-linked list.  See also FIL_PAGE_NEXT. */
+#define FIL_PAGE_NEXT                       12  /* if there is a 'natural' successor of the page, its offset. Otherwise FIL_NULL. B-tree index pages (FIL_PAGE_TYPE contains FIL_PAGE_INDEX) on the same PAGE_LEVEL are maintained as a doubly linked list via FIL_PAGE_PREV and FIL_PAGE_NEXT in the collation order of the smallest user record on each page. */
+#define FIL_PAGE_LSN                        16  /* lsn of the end of the newest modification log record to the page */
+#define FIL_PAGE_TYPE                       24  /* file page type: FIL_PAGE_INDEX,..., 2 bytes. The contents of this field can only be trusted in the following case: if the page is an uncompressed B-tree index page, then it is guaranteed that the value is FIL_PAGE_INDEX. The opposite does not hold. In tablespaces created by MySQL/InnoDB 5.1.7 or later, the contents of this field is valid for all uncompressed pages. */
+#define FIL_PAGE_FILE_FLUSH_LSN             26  /* this is only defined for the first page in a data file: the file has been flushed to disk at least up to this lsn */
+#define FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID    34  /* starting from 4.1.x this contains the space id of the page */
+#define FIL_PAGE_DATA                       38  /* start of the data on the page */
+
+/* File page trailer */
+#define FIL_PAGE_END_LSN_OLD_CHKSUM         8   /* the low 4 bytes of this are used to store the page checksum, the last 4 bytes should be identical to the last 4 bytes of FIL_PAGE_LSN */
+#define FIL_PAGE_DATA_END                   8
+
+/* File page types (values of FIL_PAGE_TYPE) */
+#define FIL_PAGE_INDEX          17855   /* B-tree node */
+#define FIL_PAGE_UNDO_LOG           2   /* Undo log page */
+#define FIL_PAGE_INODE              3   /* Index node */
+#define FIL_PAGE_IBUF_FREE_LIST     4   /* Insert buffer free list */
+/* File page types introduced in MySQL/InnoDB 5.1.7 */
+#define FIL_PAGE_TYPE_ALLOCATED     0   /* Freshly allocated page */
+#define FIL_PAGE_IBUF_BITMAP        5   /* Insert buffer bitmap */
+#define FIL_PAGE_TYPE_SYS           6   /* System page */
+#define FIL_PAGE_TYPE_TRX_SYS       7   /* Transaction system data */
+#define FIL_PAGE_TYPE_FSP_HDR       8   /* File space header */
+#define FIL_PAGE_TYPE_XDES          9   /* Extent descriptor page */
+#define FIL_PAGE_TYPE_BLOB          10  /* Uncompressed BLOB page */
+
+/* Space types */
+#define FIL_TABLESPACE      501
+#define FIL_LOG             502                    
+ 
+
+notes:
+1. 	fil_system变量保存了系统的所以已经打开的tablespace. 通过hash列表可以找到所以的tablespace。
+	同时保存了lru，unflushed列表。
+	
+2.	log ，system tablespace不在lru列表中，他们一直保持打开直到服务器关闭。
+
+3. 	checksum分2种，一种check元数据，一种check整个page。详细见算法。
+
+4.	当要进行recover时，服务器才尝试打开所有的tablespace，一般不打开所有的tablespace。 	
+
+5.  FIL_PAGE_FILE_FLUSH_LSN, only in system tablespace.
+	

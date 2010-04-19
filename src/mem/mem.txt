@@ -1,0 +1,155 @@
+bug?
+1. Q:in file: mem0pool.c, line: 614, ut_a(free + pool->reserved == pool->size);  should be => ut_a(free + pool->reserved <= pool->size); 
+   A:不会，因为在去参数的时候，innodb会对参数取值进行修改。
+
+
+/* Mask used to extract the free bit from area->size */
+#define MEM_AREA_FREE	1
+所以要注意area->size是2的倍数。这里在MYSQL_SYSVAR_LONG(name, varname, opt, comment, check, update, def, min, max, blk)宏中保证。blk=1024
+
+/* The smallest memory area total size */
+#define MEM_AREA_MIN_SIZE	(2 * MEM_AREA_EXTRA_SIZE)
+这里是因为分配的内存中要包括mem_area_t结构，所以最小要2倍MEM_AREA_EXTRA_SIZE,不然就只有自己的mem_area_t结构，没有意义。
+
+
+/* Data structure for a memory pool. The space is allocated using the buddy
+algorithm, where free list i contains areas of size 2 to power i. */
+struct mem_pool_struct{
+	byte*		buf;		/* memory pool */  指向分配的内存区
+	ulint		size;		/* memory common pool size */ 指向的buf的大小
+	ulint		reserved;	/* amount of currently allocated
+					memory */   当前以前分配的内存大小
+	mutex_t		mutex;		/* mutex protecting this struct */  
+	UT_LIST_BASE_NODE_T(mem_area_t)
+			free_list[64];	/* lists of free memory areas: an
+					area is put to the list whose number
+					is the 2-logarithm of the area size */
+};
+
+/* The common memory pool */
+mem_pool_t*	mem_comm_pool	= NULL;
+注意，这里的内存分配策略是基于ut0mem之上的。
+
+
+/* Memory area header */
+
+struct mem_area_struct{
+	ulint		size_and_free;	/* memory area size is obtained by
+					anding with ~MEM_AREA_FREE; area in
+					a free list if ANDing with
+					MEM_AREA_FREE results in nonzero */
+	UT_LIST_NODE_T(mem_area_t)
+			free_list;	/* free list node */
+};
+
+/* Each memory area takes this many extra bytes for control information */
+#define MEM_AREA_EXTRA_SIZE	(ut_calc_align(sizeof(struct mem_area_struct),\
+			UNIV_MEM_ALIGNMENT))
+内存对齐后的大小，UNIV_MEM_ALIGNMENT = 8			
+			
+mem_area_t分配过程：
+首先，从pool中申请，有就返回成功。如果失败，就转向先系统申请内存，成功返回分配的内存；失败返回NULL.
+释放内存是，首先判断内存是从pool分配还是从系统分配（比较内存地址是不是在pool->buf+pool->size之间），采用不同的free方法。
+
+
+/* The info header of a block in a memory heap */
+
+struct mem_block_info_struct {
+        ulint   magic_n;/* magic number for debugging */
+        char    file_name[8];/* file name where the mem heap was created */
+        ulint   line;   /* line number where the mem heap was created */
+        UT_LIST_BASE_NODE_T(mem_block_t) base; /* In the first block in the
+                        the list this is the base node of the list of blocks;
+                        in subsequent blocks this is undefined */  当在heap头块是才有
+        UT_LIST_NODE_T(mem_block_t) list; /* This contains pointers to next
+                        and prev in the list. The first block allocated
+                        to the heap is also the first block in this list,
+                        though it also contains the base node of the list. */
+        ulint   len;    /* physical length of this block in bytes */  不包括结构体本身大小
+        ulint   type;   /* type of heap: MEM_HEAP_DYNAMIC, or          
+                        MEM_HEAP_BUF possibly ORed to MEM_HEAP_BTR_SEARCH */  
+        ibool   init_block; /* TRUE if this is the first block used in fast
+                        creation of a heap: the memory will be freed
+                        by the creator, not by mem_heap_free */
+        ulint   free;   /* offset in bytes of the first free position for
+                        user data in the block */          当前block中空闲内存的偏移量
+        ulint   start;  /* the value of the struct field 'free' at the
+                        creation of the block */           当前block中可用内存的偏移量
+        byte*   free_block;
+                        /* if the MEM_HEAP_BTR_SEARCH bit is set in type,
+                        and this is the heap root, this can contain an
+                        allocated buffer frame, which can be appended as a
+                        free block to the heap, if we need more space;
+                        otherwise, this is NULL */
+#ifdef MEM_PERIODIC_CHECK
+        UT_LIST_NODE_T(mem_block_t) mem_block_list;
+                        /* List of all mem blocks allocated; protected
+                        by the mem_comm_pool mutex */
+#endif
+};
+#define MEM_BLOCK_MAGIC_N       764741555
+#define MEM_FREED_BLOCK_MAGIC_N 547711122
+
+/* Header size for a memory heap block */
+#define MEM_BLOCK_HEADER_SIZE   ut_calc_align(sizeof(mem_block_info_t),\
+                                                        UNIV_MEM_ALIGNMENT)
+														
+
+
+/* -------------------- MEMORY HEAPS ----------------------------- */
+
+/* The info structure stored at the beginning of a heap block */
+typedef struct mem_block_info_struct mem_block_info_t;
+
+/* A block of a memory heap consists of the info structure
+followed by an area of memory */
+typedef mem_block_info_t        mem_block_t;
+
+/* A memory heap is a nonempty linear list of memory blocks */
+typedef mem_block_t     mem_heap_t;
+
+上面3种虽然都是同一种数据结构，可是表达的意思不同
+1.mem_block_info_t 仅仅表示这个内存块的元数据
+2.mem_block_t 表示整块内存块，包括元数据和可用的内存区
+3.mem_heap_t  表示一个逻辑的heap，这个heap是有多个mem_block_t用链表的形式表示
+
+/* Types of allocation for memory heaps: DYNAMIC means allocation from the
+dynamic memory pool of the C compiler, BUFFER means allocation from the
+buffer pool; the latter method is used for very big heaps */
+
+#define MEM_HEAP_DYNAMIC        0       /* the most common type */
+#define MEM_HEAP_BUFFER         1             当请求的大小小于页的一半的时候，也从mem_comm_pool中分配内存。
+#define MEM_HEAP_BTR_SEARCH     2       /* this flag can optionally be
+                                        ORed to MEM_HEAP_BUFFER, in which
+                                        case heap->free_block is used in
+                                        some cases for memory allocations,
+                                        and if it's NULL, the memory
+                                        allocation functions can return
+                                        NULL. */
+
+/* The following start size is used for the first block in the memory heap if
+the size is not specified, i.e., 0 is given as the parameter in the call of
+create. The standard size is the maximum (payload) size of the blocks used for
+allocations of small buffers. */
+
+#define MEM_BLOCK_START_SIZE            64
+#define MEM_BLOCK_STANDARD_SIZE         8000
+
+/* If a memory heap is allowed to grow into the buffer pool, the following
+is the maximum size for a single allocated buffer: */
+#define MEM_MAX_ALLOC_IN_BUF            (UNIV_PAGE_SIZE - 200)
+
+/**********************************************************************														
+
+
+note：
+1.MEM_HEAP_DYNAMIC 从mem_comm_pool中分配内存，内存大小没有限制。
+2.MEM_HEAP_BUFFER  当len < UNIV_PAGE_SIZE / 2时，还是从mem_comm_pool中分配内存，否则从buffer pool中分配内存，大小不能超过MEM_MAX_ALLOC_IN_BUF（在buffer中以整页一起分配）。
+3.每次添加block的大小是最后block的2倍，但是不超过相应的最大值。
+
+
+
+
+
+
+			

@@ -1,0 +1,33 @@
+/* The session handle. All fields are protected by the kernel mutex */
+struct sess_struct{
+        ulint           state;          /* state of the session */
+        trx_t*          trx;            /* transaction object permanently
+                                        assigned for the session: the
+                                        transaction instance designated by the
+                                        trx id changes, but the memory
+                                        structure is preserved */
+        UT_LIST_BASE_NODE_T(que_t)
+                        graphs;         /* query graphs belonging to this
+                                        session */
+};
+
+/* Session states */
+#define SESS_ACTIVE             1
+#define SESS_ERROR              2       /* session contains an error message
+                                        which has not yet been communicated
+                                        to the client */
+										
+/* Dummy session used currently in MySQL interface */
+sess_t*         trx_dummy_sess = NULL;
+
+note:
+1. 只有sess_open()调用，没有sess_close(),sess_try_close()调用。并且只有trx_dummy_sess这个变量使用。
+
+
+
+QUESTION:
+1. 这个sess_struct有什么意义？  是不是用于确保最少有一个trx_t？	
+	/* The transaction handle; every session has a trx object which is freed only
+when the session is freed; in addition there may be session-less transactions
+rolling back after a database recovery */
+	当trx_create(NULL)时，sess_t为空，没有被初始化，在recover过程中。

@@ -1,0 +1,71 @@
+version: mysql 5.x
+Mysql:
+1.  Q: CHAR ,VARCHAR are different?
+    A: Yes, CHAR will be ignore the spaces at the end of string.
+    
+    
+Innodb:
+1.  Q: when and how to use the information_schema tables?
+    A: always use the information_schema tables. both select from information_schema and show commands.
+       if this is the show commands. first calling prepare_schema_table() -> make_schema_select() to change
+       the show commands to select commands.
+	   
+2.  Q: when are the information_schema tables filled? 
+    A: for each command ,the information_schema table is dynamic filled . detail see: information_schema plugin
+       and sql/sql_show.* files.
+       
+3.  Q: how many innodb log files is support?
+    A: max is 16. defaults is 2. detail see: SRV_LOG_SPACE_FIRST_ID
+    
+4.  Q: how to monitor innodb status?
+    A: can use these magic monitor tables: innodb_monitor, innodb_lock_monitor, innodb_tablespace_monitor,
+       innodb_table_monitor, innodb_mem_validate.
+       ps: create table innodb_monitor (a int) engine = innodb;
+
+5.  Q: what's the 7 rollback segment id mean?
+    A: 1:is_innserted,2:rseg_id,2:page_no,2:offset
+    
+6.  Q: what's the innodb buffer structure?
+    A: innodb buffer is constructed as (blocks) -> (frame). frame is equal to page. 
+       In innodb plugin  (chuncks) -> (blocks) -> (frame)
+       
+7.  Q: about innodb table structure?
+    A: dict_table_t -
+                    --> dict_foreign_t -
+                    |                  --> dict_index_t 
+                    |
+                    --> dict_index_t -
+                                     --> dict_field_t -
+                                                      --> dict_col_t
+
+
+8. Q: how to alloct page in segment?
+   A: the first 32 pages of a segment are allocated from 'fragment extent',
+      where any individual page can be allocated. after that, a segment always
+      reserves the whole 64 page extents.
+
+9. Q: how do innodb execute read-ahead both sequential and random?
+   A: if do sequential read-ahead, it will read next 64 pages extent. maybe
+      block other read util the whole extent be read.
+      Random read-ahead means that when InnoDB notices that if at least 13
+      pages in an extent have been accessed very recently, then InnoDB reads
+      in all the rest of the pages in the extent.
+
+10. Q: how does innodb to reuse the free space?
+    A: Free space can always be recycled within a segment. A segment can
+    release free space to other segments, if a 64 page extent becomes totally
+    empty, and also it can release individual pages from its 32 fragment
+    extent pages.
+
+11. Q: how to create mysql trace file? 
+    A: debug = t:T:n:o,/tmp/mysqld.trace
+
+12. Q: when and how to use the information_schema tables?
+    A: always use the information_schema tables. both select from information_schema and show commands.
+       if this is the show commands. first calling prepare_schema_table() -> make_schema_select() to change
+       the show commands to select commands.
+	   
+13. Q: when are the information_schema tables filled? 
+    A: for each command ,the information_schema table is dynamic filled . detail see: information_schema plugin
+       and sql/sql_show.* files.
+

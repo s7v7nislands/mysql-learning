@@ -1,0 +1,71 @@
+typedef struct hash_table_struct hash_table_t;
+typedef struct hash_cell_struct hash_cell_t;
+
+typedef void*   hash_node_t;
+
+
+struct hash_cell_struct{
+        void*   node;   /* hash chain node, NULL if none */
+};
+
+/* The hash table external chain node */
+
+typedef struct ha_node_struct ha_node_t;
+struct ha_node_struct {
+        ha_node_t* next; /* next chain node or NULL if none */
+        void*   data;   /* pointer to the data */
+        ulint   fold;   /* fold 
+};
+用于adapter index.
+
+/* The hash table structure */
+struct hash_table_struct {
+        ibool           adaptive;/* TRUE if this is the hash table of the
+                                adaptive hash index */
+        ulint           n_cells;/* number of cells in the hash table */     取大于n（参数）的最小素数
+        hash_cell_t*    array;  /* pointer to cell array */
+        ulint           n_mutexes;/* if mutexes != NULL, then the number of   
+                                mutexes, must be a power of 2 */
+        mutex_t*        mutexes;/* NULL, or an array of mutexes used to
+                                protect segments of the hash table */
+        mem_heap_t**    heaps;  /* if this is non-NULL, hash chain nodes for
+                                external chaining can be allocated from these
+                                memory heaps; there are then n_mutexes many of
+                                these heaps */
+        mem_heap_t*     heap;
+        ulint           magic_n;
+};
+
+#define HASH_TABLE_MAGIC_N      76561114
+
+
+note：
+1. adaptive: 表示是不是adaptive hash index
+2. n_cells： 表示hash表中hash结点的个数。取大于n（参数）的最小素数
+3. array：   保存hash结点的指针
+4. n_mutexes, mutexes, heaps: 3个字段一起表示hash_node_t的分配位置（申请mutex时），  没有在代码中使用。
+5. heap：    表示hash_node_t内容的分配位置（不申请mutex时）
+6. 这里的hash冲突是采用链表的方法来解决,同时在冲突链表中有2种不同的存储方法。
+	1. 直接指针法: 
+					这种情况时，冲突列表中的元素是要hash对象的指针,所以这里不需要额外的内存空间，因此不会用到heap相关字段。
+					在这种情况下搜索是要加额外的条件来判断，具体见HASH_INSERT(TYPE, NAME, TABLE, FOLD, DATA)的定义。
+	2. hash_node_t:
+					在这种情况下，冲突列表中的元素是hash_node_t的指针,hash_node_t在hash table的heap中分配内存。
+					搜索的时候因为hash_node_t中保存了相关信息，可以直接比较。
+					
+	上面2种的应用情况不一样：
+		方法1主要用于利用结构体中的成员的fold，来查找hash table中的结构体。	
+		方法2主要用于结构体的本身的fold，来查找本身。（主要用于adapter hash，见btr/btr0sea.c）
+		
+7. HASH_INSERT(TYPE, NAME, TABLE, FOLD, DATA)
+   HASH_DELETE(TYPE, NAME, TABLE, FOLD, DATA)
+   HASH_GET_FIRST(TABLE, HASH_VAL)
+   HASH_GET_NEXT(NAME, DATA)
+   HASH_SEARCH(NAME, TABLE, FOLD, DATA, TEST)
+   HASH_DELETE_AND_COMPACT(TYPE, NAME, TABLE, NODE)
+   HASH_MIGRATE(OLD_TABLE, NEW_TABLE, NODE_TYPE, PTR_NAME, FOLD_FUNC)
+   对应第一种情况。也可以用于第二种情况，因为它可以看作是第一种的特殊情况，DATA=&hash_node_t。   
+
+
+
+

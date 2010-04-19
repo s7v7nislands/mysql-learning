@@ -1,0 +1,247 @@
+os_thread:
+/* Maximum number of threads which can be created in the program;
+this is also the size of the wait slot array for MySQL threads which
+can wait inside InnoDB */
+
+#define OS_THREAD_MAX_N         srv_max_n_threads
+
+note：
+1. 线程数的大小取决于buffer pool的大小。
+		if (srv_pool_size >= 1000 * 1024) {
+                /* Here we still have srv_pool_size counted
+                in kilobytes (in 4.0 this was in bytes)
+                srv_boot() converts the value to
+                pages; if buffer pool is less than 1000 MB,
+                assume fewer threads. */
+                srv_max_n_threads = 50000;
+
+        } else if (srv_pool_size >= 8 * 1024) {
+
+                srv_max_n_threads = 10000;
+        } else {
+                srv_max_n_threads = 1000;       /* saves several MB of memory,
+                                                especially in 64-bit
+                                                computers */
+        }
+	
+2. 同时线程数的多少觉得了初始化是slot数据的大小。
+3. 封装不同平台的thread函数。
+
+
+
+/* Possible fixed priorities for threads */
+#define OS_THREAD_PRIORITY_NONE         100
+#define OS_THREAD_PRIORITY_BACKGROUND   1
+#define OS_THREAD_PRIORITY_NORMAL       2
+#define OS_THREAD_PRIORITY_ABOVE_NORMAL 3
+
+note：
+1. innodb中的调节线程优先级只对windows系统有效。
+2. mysql服务器中的调节线程优先级将不使用。
+
+
+
+os_proc:
+note:
+1. large_pages在linux上可以启动大内存页。不过事先要配置好hugetlb。只对buffer pool起作用，不包括common pool。
+
+
+os_sync:
+
+typedef pthread_mutex_t os_fast_mutex_t;
+
+typedef struct os_event_struct  os_event_struct_t;
+typedef os_event_struct_t*      os_event_t;
+
+struct os_event_struct {
+        os_fast_mutex_t os_mutex;       /* this mutex protects the next
+                                        fields */
+        ibool           is_set;         /* this is TRUE when the event is
+                                        in the signaled state, i.e., a thread
+                                        does not stop if it tries to wait for
+                                        this event */
+        ib_longlong     signal_count;   /* this is incremented each time
+                                        the event becomes signaled */
+        pthread_cond_t  cond_var;       /* condition variable is used in
+                                        waiting for the event */
+        UT_LIST_NODE_T(os_event_struct_t) os_event_list;
+                                        /* list of all created events */
+};
+
+
+typedef struct os_mutex_struct  os_mutex_str_t;
+typedef os_mutex_str_t*         os_mutex_t;
+
+#define OS_SYNC_INFINITE_TIME   ((ulint)(-1))
+
+#define OS_SYNC_TIME_EXCEEDED   1
+以上宏定义用于windows
+
+/* Mutex protecting counts and the event and OS 'slow' mutex lists */
+extern os_mutex_t       os_sync_mutex;
+
+/* This is incremented by 1 in os_thread_create and decremented by 1 in
+os_thread_exit */
+extern ulint            os_thread_count;
+
+extern ulint            os_event_count;
+extern ulint            os_mutex_count;
+
+
+/* Type definition for an operating system mutex struct */
+struct os_mutex_struct{
+        os_event_t      event;  /* Used by sync0arr.c for queing threads */
+        void*           handle; /* OS handle to mutex */
+        ulint           count;  /* we use this counter to check
+                                that the same thread does not
+                                recursively lock the mutex: we
+                                do not assume that the OS mutex
+                                supports recursive locking, though
+                                NT seems to do that */
+        UT_LIST_NODE_T(os_mutex_str_t) os_mutex_list;
+                                /* list of all 'slow' OS mutexes created */
+};
+
+/* Mutex protecting counts and the lists of OS mutexes and events */
+os_mutex_t      os_sync_mutex;
+ibool           os_sync_mutex_inited    = FALSE;
+ibool           os_sync_free_called     = FALSE;
+
+/* This is incremented by 1 in os_thread_create and decremented by 1 in
+os_thread_exit */
+ulint   os_thread_count         = 0;
+
+/* The list of all events created */
+UT_LIST_BASE_NODE_T(os_event_struct_t)  os_event_list;
+
+/* The list of all OS 'slow' mutexes */
+UT_LIST_BASE_NODE_T(os_mutex_str_t)     os_mutex_list;
+
+
+note:
+1. os_mutex_list, os_event_list 保存着整个系统的系统mutex和event，其中每个mutex又包含一个event。
+2. os_sync_mutex 保护整个系统的os_mutex_list, os_event_list. 同时自己也list中。(与mutex_list_mutex不同)
+3. 注意os_event_struct中is_set， signal_count字段的含义。详细见os_event_wait_low()函数。
+   is_set 表示event发生了。signal_count 用于防止event丢失的情况。
+4. os_event_wait_low(),os_event_wait() 的区别在于后者允许出现事件丢失的情况。
+5. 如果os_event_t 是在 os_mutex_create()中创建的，则释放的时候有os_mutex_free()来间接释放。并会调用os_event_free_internal(),避免循环加锁。
+6. 在os_sync_free()中，采用优化的方式来释放。首先整体释放os_event_t，然后整体释放os_mutex_t。其实可以直接释放os_mutex_t，然后释放那些额外的os_event_t。
+7. os_event_t      event;  /* Used by sync0arr.c for queing threads */。 
+
+
+os_file:
+/* The aio array slot structure */
+typedef struct os_aio_slot_struct       os_aio_slot_t;
+
+struct os_aio_slot_struct{
+        ibool           is_read;        /* TRUE if a read operation */
+        ulint           pos;            /* index of the slot in the aio
+                                        array */
+        ibool           reserved;       /* TRUE if this slot is reserved */
+        time_t          reservation_time;/* time when reserved */
+        ulint           len;            /* length of the block to read or
+                                        write */
+        byte*           buf;            /* buffer used in i/o */
+        ulint           type;           /* OS_FILE_READ or OS_FILE_WRITE */
+        ulint           offset;         /* 32 low bits of file offset in
+                                        bytes */
+        ulint           offset_high;    /* 32 high bits of file offset */
+        os_file_t       file;           /* file where to read or write */
+        const char*     name;           /* file name or path */
+        ibool           io_already_done;/* used only in simulated aio:
+                                        TRUE if the physical i/o already
+                                        made and only the slot message
+                                        needs to be passed to the caller
+                                        of os_aio_simulated_handle */
+        fil_node_t*     message1;       /* message which is given by the */
+        void*           message2;       /* the requester of an aio operation
+                                        and which can be used to identify
+                                        which pending aio operation was
+                                        completed */
+#ifdef WIN_ASYNC_IO
+        os_event_t      event;          /* event object we need in the
+                                        OVERLAPPED struct */
+        OVERLAPPED      control;        /* Windows control block for the
+                                        aio request */
+#elif defined(POSIX_ASYNC_IO)
+        struct aiocb    control;        /* Posix control block for aio
+                                        request */
+#endif
+};
+/* The aio array structure */
+typedef struct os_aio_array_struct      os_aio_array_t;
+
+struct os_aio_array_struct{
+        os_mutex_t      mutex;    /* the mutex protecting the aio array */
+        os_event_t      not_full; /* The event which is set to the signaled
+                                  state when there is space in the aio
+                                  outside the ibuf segment */
+        os_event_t      is_empty; /* The event which is set to the signaled
+                                  state when there are no pending i/os
+                                  in this array */
+        ulint           n_slots;  /* Total number of slots in the aio array.
+                                  This must be divisible by n_threads. */
+        ulint           n_segments;/* Number of segments in the aio array of
+                                  pending aio requests. A thread can wait
+                                  separately for any one of the segments. */
+        ulint           n_reserved;/* Number of reserved slots in the
+                                  aio array outside the ibuf segment */
+        os_aio_slot_t*  slots;    /* Pointer to the slots in the array */
+#ifdef __WIN__
+        os_native_event_t* native_events;
+                                  /* Pointer to an array of OS native event
+                                  handles where we copied the handles from
+                                  slots, in the same order. This can be used
+                                  in WaitForMultipleObjects; used only in
+                                  Windows */
+#endif
+};
+/* Array of events used in simulated aio */
+os_event_t*     os_aio_segment_wait_events      = NULL;
+
+/* The aio arrays for non-ibuf i/o and ibuf i/o, as well as sync aio. These
+are NULL when the module has not yet been initialized. */
+static os_aio_array_t*  os_aio_read_array       = NULL;
+static os_aio_array_t*  os_aio_write_array      = NULL;
+static os_aio_array_t*  os_aio_ibuf_array       = NULL;
+static os_aio_array_t*  os_aio_log_array        = NULL;
+static os_aio_array_t*  os_aio_sync_array       = NULL;
+
+static ulint    os_aio_n_segments       = ULINT_UNDEFINED;
+
+/* If the following is TRUE, read i/o handler threads try to
+wait until a batch of new read requests have been posted */
+static ibool    os_aio_recommend_sleep_for_read_threads = FALSE;
+
+ulint   os_n_file_reads         = 0;	//读文件的次数
+ulint   os_bytes_read_since_printout = 0;
+ulint   os_n_file_writes        = 0;	//写文件的次数
+ulint   os_n_fsyncs             = 0;	
+ulint   os_n_file_reads_old     = 0;
+ulint   os_n_file_writes_old    = 0;
+ulint   os_n_fsyncs_old         = 0;
+time_t  os_last_printout;
+
+ibool   os_has_said_disk_full   = FALSE;
+
+/* The mutex protecting the following counts of pending I/O operations */
+static os_mutex_t os_file_count_mutex;
+ulint   os_file_n_pending_preads  = 0;  //当有pread，pwrite时。
+ulint   os_file_n_pending_pwrites = 0;  //当有pread，pwrite时。
+ulint   os_n_pending_writes = 0;        //
+ulint   os_n_pending_reads = 0;         //
+
+note：
+1. 主要定义了跨平台的文件操作和异步i/o。
+2. 在linux下innodb_file_io_threads == 4，设置成别的值无效。根据os_aio_use_native_aio值来判断。
+   linux下的异步队列：
+   os_aio_ibuf_array
+   os_aio_log_array
+   os_aio_read_array
+   os_aio_write_array
+   以上每个队列中最多可以有8 * SRV_N_PENDING_IOS_PER_THREAD = 8 * 32个io请求。
+   os_aio_sync_array
+   以上每个队列中最多可以有SRV_N_PENDING_IOS_PER_THREAD = 100个io请求。
+3. os_aio_ibuf_array，os_aio_log_array 只能有一个segment，os_aio_read_array，os_aio_write_array平分剩下的segments。  
+4. fil_io对os_aio进行了封装。
+   
