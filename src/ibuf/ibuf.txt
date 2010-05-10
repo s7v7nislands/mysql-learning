@@ -1,0 +1,195 @@
+ibuf/ibuf0ibuf.c
+
+/*  STRUCTURE OF AN INSERT BUFFER RECORD
+
+In versions < 4.1.x:
+
+1. The first field is the page number.
+2. The second field is an array which stores type info for each subsequent
+   field. We store the information which affects the ordering of records, and
+   also the physical storage size of an SQL NULL value. E.g., for CHAR(10) it
+   is 10 bytes.
+3. Next we have the fields of the actual index record.
+
+In versions >= 4.1.x:
+
+Note that contary to what we planned in the 1990's, there will only be one
+insert buffer tree, and that is in the system tablespace of InnoDB.
+
+1. The first field is the space id.
+2. The second field is a one-byte marker (0) which differentiates records from
+   the < 4.1.x storage format.
+3. The third field is the page number.
+4. The fourth field contains the type info, where we have also added 2 bytes to
+   store the charset. In the compressed table format of 5.0.x we must add more
+   information here so that we can build a dummy 'index' struct which 5.0.x
+   can use in the binary search on the index page in the ibuf merge phase.
+5. The rest of the fields contain the fields of the actual index record.
+
+In versions >= 5.0.3:
+
+The first byte of the fourth field is an additional marker (0) if the record
+is in the compact format.  The presence of this marker can be detected by
+looking at the length of the field modulo DATA_NEW_ORDER_NULL_TYPE_BUF_SIZE.
+
+The high-order bit of the character set field in the type info is the
+"nullable" flag for the field. */
+
+/*  PREVENTING DEADLOCKS IN THE INSERT BUFFER SYSTEM
+
+If an OS thread performs any operation that brings in disk pages from
+non-system tablespaces into the buffer pool, or creates such a page there,
+then the operation may have as a side effect an insert buffer index tree
+compression. Thus, the tree latch of the insert buffer tree may be acquired
+in the x-mode, and also the file space latch of the system tablespace may
+be acquired in the x-mode.
+
+Also, an insert to an index in a non-system tablespace can have the same
+effect. How do we know this cannot lead to a deadlock of OS threads? There
+is a problem with the i\o-handler threads: they break the latching order
+because they own x-latches to pages which are on a lower level than the
+insert buffer tree latch, its page latches, and the tablespace latch an
+insert buffer operation can reserve.
+
+The solution is the following: Let all the tree and page latches connected
+with the insert buffer be later in the latching order than the fsp latch and
+fsp page latches.
+
+Insert buffer pages must be such that the insert buffer is never invoked
+when these pages are accessed as this would result in a recursion violating
+the latching order. We let a special i/o-handler thread take care of i/o to
+the insert buffer pages and the ibuf bitmap pages, as well as the fsp bitmap
+pages and the first inode page, which contains the inode of the ibuf tree: let
+us call all these ibuf pages. To prevent deadlocks, we do not let a read-ahead
+access both non-ibuf and ibuf pages.
+
+Then an i/o-handler for the insert buffer never needs to access recursively the
+insert buffer tree and thus obeys the latching order. On the other hand, other
+i/o-handlers for other tablespaces may require access to the insert buffer,
+but because all kinds of latches they need to access there are later in the
+latching order, no violation of the latching order occurs in this case,
+either.
+
+A problem is how to grow and contract an insert buffer tree. As it is later
+in the latching order than the fsp management, we have to reserve the fsp
+latch first, before adding or removing pages from the insert buffer tree.
+We let the insert buffer tree have its own file space management: a free
+list of pages linked to the tree root. To prevent recursive using of the
+insert buffer when adding pages to the tree, we must first load these pages
+to memory, obtaining a latch on them, and only after that add them to the
+free list of the insert buffer tree. More difficult is removing of pages
+from the free list. If there is an excess of pages in the free list of the
+ibuf tree, they might be needed if some thread reserves the fsp latch,
+intending to allocate more file space. So we do the following: if a thread
+reserves the fsp latch, we check the writer count field of the latch. If
+this field has value 1, it means that the thread did not own the latch
+before entering the fsp system, and the mtr of the thread contains no
+modifications to the fsp pages. Now we are free to reserve the ibuf latch,
+and check if there is an excess of pages in the free list. We can then, in a
+separate mini-transaction, take them out of the free list and free them to
+the fsp system.
+
+To avoid deadlocks in the ibuf system, we divide file pages into three levels:
+
+(1) non-ibuf pages,
+(2) ibuf tree pages and the pages in the ibuf tree free list, and
+(3) ibuf bitmap pages.
+
+No OS thread is allowed to access higher level pages if it has latches to
+lower level pages; even if the thread owns a B-tree latch it must not access
+the B-tree non-leaf pages if it has latches on lower level pages. Read-ahead
+is only allowed for level 1 and 2 pages. Dedicated i/o-handler threads handle
+exclusively level 1 i/o. A dedicated i/o handler thread handles exclusively
+level 2 i/o. However, if an OS thread does the i/o handling for itself, i.e.,
+it uses synchronous aio, it can access any pages, as long as it obeys the
+access order rules. */
+
+/* Buffer pool size per the maximum insert buffer size */
+#define IBUF_POOL_SIZE_PER_MAX_SIZE 2                   
+
+
+/* The start address for an insert buffer bitmap page bitmap */
+#define IBUF_BITMAP     PAGE_DATA
+
+/* Offsets in bits for the bits describing a single page in the bitmap */
+#define IBUF_BITMAP_FREE        0   /* two bits, mean the free space size */
+#define IBUF_BITMAP_BUFFERED    2
+#define IBUF_BITMAP_IBUF        3   /* TRUE if page is a part of the ibuf tree, excluding the root page, or is in the free list of the ibuf */
+
+/* Number of bits describing a single page */
+#define IBUF_BITS_PER_PAGE  4
+
+
+/* Inside the merge area, pages which have at most 1 per this number less
+buffered entries compared to maximum volume that can buffered for a single
+page are merged along with the page whose buffer became full */
+#define IBUF_MERGE_THRESHOLD        4
+
+/* In ibuf_contract at most this number of pages is read to memory in one
+batch, in order to merge the entries for them in the insert buffer */
+#define IBUF_MAX_N_PAGES_MERGED     IBUF_MERGE_AREA
+
+/* If the combined size of the ibuf trees exceeds ibuf->max_size by this
+many pages, we start to contract it in connection to inserts there, using
+non-synchronous contract */
+#define IBUF_CONTRACT_ON_INSERT_NON_SYNC    0
+
+/* Same as above, but use synchronous contract */
+#define IBUF_CONTRACT_ON_INSERT_SYNC        5
+
+/* Same as above, but no insert is done, only contract is called */
+#define IBUF_CONTRACT_DO_NOT_INSERT     10
+
+/* TODO: how to cope with drop table if there are records in the insert
+buffer for the indexes of the table? Is there actually any problem,
+because ibuf merge is done to a page when it is read in, and it is
+still physically like the index page even if the index would have been
+dropped! So, there seems to be no problem. */
+
+include/ibuf0ibuf.h
+
+#define IBUF_HEADER_PAGE_NO     FSP_IBUF_HEADER_PAGE_NO
+#define IBUF_TREE_ROOT_PAGE_NO  FSP_IBUF_TREE_ROOT_PAGE_NO
+
+/* The ibuf header page currently contains only the file segment header
+for the file segment from which the pages for the ibuf tree are allocated */
+#define IBUF_HEADER             PAGE_DATA
+#define IBUF_TREE_SEG_HEADER    0           /* fseg header(size 10 bytes) for ibuf tree , point to segment inode */  
+
+include/ibuf0ibuf.ic
+
+/* If this number is n, an index page must contain at least the page size
+per n bytes of free space for ibuf to try to buffer inserts to this page.
+If there is this much of free space, the corresponding bits are set in the
+ibuf bitmap. */
+#define IBUF_PAGE_SIZE_PER_FREE_SPACE   32
+
+
+/* Insert buffer data struct for a single tablespace */
+struct ibuf_data_struct{
+    ulint   space;                          /* space id */
+    ulint   seg_size;                       /* allocated pages if the file segment containing ibuf header and tree */
+    ulint   size;                           /* size of the insert buffer tree in pages */
+    ibool   empty;                          /* after an insert to the ibuf tree is performed, this is set to FALSE, and if a contract operation finds the tree empty, this is set to TRUE */
+    ulint   free_list_len;                  /* length of the free list */
+    ulint   height;                         /* tree height */
+    dict_index_t*   index;                  /* insert buffer index */
+    UT_LIST_NODE_T(ibuf_data_t) data_list;  /* list of ibuf data structs */
+    ulint   n_inserts;                      /* number of inserts made to the insert buffer */
+    ulint   n_merges;                       /* number of pages merged */
+    ulint   n_merged_recs;                  /* number of records merged */
+};
+
+struct ibuf_struct{
+    ulint       size;                           /* current size of the ibuf index trees in pages */
+    ulint       max_size;                       /* recommended maximum size in pages for the ibuf index tree */
+    UT_LIST_BASE_NODE_T(ibuf_data_t) data_list; /* list of ibuf data structs for each tablespace */    /* only for space 0 */
+};
+
+
+note:
+1. record structure of the ibuf.
+    dtuple_t[dfield_t[0],dfield_t[1],dfield_t[2],dfield_t[3],{dfield_t structures of index record}]
+    
+2. the record format is old format.
+3. SYS_IBUF_TABLE_%d 在内存中的表结构。

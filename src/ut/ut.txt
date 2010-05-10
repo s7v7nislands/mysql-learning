@@ -1,0 +1,213 @@
+ut目录下主要包括innodb使用的常用数据结构，排序算法，内存组织等
+
+-----------------------------------------------
+1. struct ib_wqueue_struct   innodb工作队列结构
+
+/* Work queue. */
+struct ib_wqueue_struct {
+        mutex_t         mutex;  /* mutex protecting everything */
+        ib_list_t*      items;  /* work item list */
+        os_event_t      event;  /* event we use to signal additions to list */
+};
+
+mutex保护整个work queue结构
+items指向整个work list，里面包含指针
+event表示要等待的事件。但等待的事件发生的时候，返回items中第一个节点的data指针，对其进行处理。
+
+note：
+1.代码中没有用到。
+
+
+--------------------------------------------------
+2. struct ib_vector_struct	innodb的vector数据结构
+
+typedef struct ib_vector_struct ib_vector_t;
+
+/* An automatically resizing vector datatype with the following properties:
+
+ -Contains void* items.
+
+ -The items are owned by the caller.
+
+ -All memory allocation is done through a heap owned by the caller, who is
+ responsible for freeing it when done with the vector.
+
+ -When the vector is resized, the old memory area is left allocated since it
+ uses the same heap as the new memory area, so this is best used for
+ relatively small or short-lived uses.
+*/
+
+/* See comment at beginning of file. */
+struct ib_vector_struct {
+        mem_heap_t*     heap;   /* heap */
+        void**          data;   /* data elements */
+        ulint           used;   /* number of elements currently used */
+        ulint           total;  /* number of elements allocated */
+};
+
+
+note：
+1.在vector自动扩大内存的时候，没有检查内存分配失败的情况。所以使用vector是要特别注意。
+2.在vector中(*data)的内存有调用者自己负责释放。
+3.当vector自动增大的时候，不释放旧的内存区域。到释放vector结构时，一起释放heap。
+4.vector的resize算法是 new_total = old_total * 2.
+5.在pars/pars0pars.c中使用
+
+-----------------------
+3. sort utility. 宏定义
+
+/* This module gives a macro definition of the body of
+a standard sort function for an array of elements of any
+type. The comparison function is given as a parameter to
+the macro. The sort algorithm is mergesort which has logarithmic
+worst case.
+*/
+
+/***********************************************************************
+This macro expands to the body of a standard sort function.
+The sort function uses mergesort and must be defined separately
+for each type of array.
+Also the comparison function has to be defined individually
+for each array cell type. SORT_FUN is the sort function name.
+The function takes the array to be sorted (ARR),
+the array of auxiliary space (AUX_ARR) of same size,
+and the low (LOW), inclusive, and high (HIGH), noninclusive,
+limits for the sort interval as arguments.
+CMP_FUN is the comparison function name. It takes as arguments
+two elements from the array and returns 1, if the first is bigger,
+0 if equal, and -1 if the second bigger. For an eaxmaple of use
+see test program in tsut.c. */
+
+#define UT_SORT_FUNCTION_BODY(SORT_FUN, ARR, AUX_ARR, LOW, HIGH, CMP_FUN)
+
+note：
+1.采用二分法来排序。
+2.宏展开是一个函数体。SORT_FUN用于函数的嵌套调用，CMP_FUN用于排序比较，比较的范围[LOW,HIGH).
+3.详细用法见 ut_dulint_sort()函数
+4.未使用
+
+
+---------------
+4. debug 宏定义
+定义了assert出错时的处理情况。
+
+
+---------------------
+5.list数据结构
+
+/***********************************************************************
+A double-linked list. This differs from the one in ut0lst.h in that in this
+one, each list node contains a pointer to the data, whereas the one in
+ut0lst.h uses a strategy where the list pointers are embedded in the data
+items themselves.
+
+Use this one when you need to store arbitrary data in the list where you
+can't embed the list pointers in the data, if a data item needs to be
+stored in multiple lists, etc.
+
+Note about the memory management: ib_list_t is a fixed-size struct whose
+allocation/deallocation is done through ib_list_create/ib_list_free, but the
+memory for the list nodes is allocated through a user-given memory heap,
+which can either be the same for all nodes or vary per node. Most users will
+probably want to create a memory heap to store the item-specific data, and
+pass in this same heap to the list node creation functions, thus
+automatically freeing the list node when the item's heap is freed.
+
+************************************************************************/
+
+/* List. */
+struct ib_list_struct {
+        ib_list_node_t*         first;          /* first node */
+        ib_list_node_t*         last;           /* last node */
+        ibool                   is_heap_list;   /* TRUE if this list was
+                                                allocated through a heap */ 在释放的时候有区别。
+};
+
+
+/* A list node. */
+struct ib_list_node_struct {
+        ib_list_node_t*         prev;           /* previous node */
+        ib_list_node_t*         next;           /* next node */
+        void*                   data;           /* user data */
+};
+
+/* Quite often, the only additional piece of data you need is the per-item
+memory heap, so we have this generic struct available to use in those
+cases. */
+struct ib_list_helper_struct {
+        mem_heap_t*     heap;           /* memory heap */
+        void*           data;           /* user data */
+};
+
+note：
+1.ib_list_helper_struct在代码中未使用。
+2.其余代码只在ut0wqueue中使用， :-(
+
+
+------------------------------------
+6.memory
+/* This struct is placed first in every allocated memory block */
+typedef struct ut_mem_block_struct ut_mem_block_t;
+
+/* The total amount of memory currently allocated from the OS with malloc */
+ulint   ut_total_allocated_memory       = 0;
+
+struct ut_mem_block_struct{
+        UT_LIST_NODE_T(ut_mem_block_t) mem_block_list;
+                        /* mem block list node */
+        ulint   size;   /* size of allocated memory */
+        ulint   magic_n;
+};
+
+#define UT_MEM_MAGIC_N  1601650166
+
+/* List of all memory blocks allocated from the operating system
+with malloc */
+UT_LIST_BASE_NODE_T(ut_mem_block_t)   ut_mem_block_list;
+
+note:
+1. 所以innodb的内存分配都在这些函数之上。（不包括large page，这种情况下是通过shm_* 来实现的）
+2. ut_mem_block_struct的size包括请求的内存大小+ut_mem_block_struct结构体本身大小。
+3. ut_total_allocated_memory = sum(each(ut_mem_block_list).size)
+
+
+
+-------------------------------------
+7.LIST
+#define UT_LIST_BASE_NODE_T(TYPE)\
+struct {\
+        ulint   count;  /* count of nodes in list */\
+        TYPE *  start;  /* pointer to list start, NULL if empty */\
+        TYPE *  end;    /* pointer to list end, NULL if empty */\
+}
+
+#define UT_LIST_NODE_T(TYPE)\
+struct {\
+        TYPE *  prev;   /* pointer to the previous node,\
+                        NULL if start of list */\
+        TYPE *  next;   /* pointer to next node, NULL if end of list */\
+}
+
+UT_LIST_ADD_FIRST(NAME, BASE, N)
+UT_LIST_ADD_LAST(NAME, BASE, N)
+UT_LIST_INSERT_AFTER(NAME, BASE, NODE1, NODE2)
+UT_LIST_REMOVE(NAME, BASE, N)
+
+note：
+1. 与list不同，这里可以链接不同类型的结构体。和linux kernel的head_list类似。
+2. BASE：根节点， NAME：UT_LIST_NODE_T在结构体中的字段名， N：链表节点指针
+
+--------------------------------------
+8. rand
+note：
+1. 一些产生随机数的函数
+
+--------------------------------------
+9. byte
+note：
+1. 自定义了dulint及相关操作。
+
+--------------------------------------
+10. ut
+note:
+1. 定义了一些常用的函数。

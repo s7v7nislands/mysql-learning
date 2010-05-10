@@ -1,0 +1,600 @@
+include/buf0buf.h
+
+/* Flags for flush types */
+#define BUF_FLUSH_LRU           1
+#define BUF_FLUSH_SINGLE_PAGE   2
+#define BUF_FLUSH_LIST          3   /* An array in the pool struct has size BUF_FLUSH_LIST + 1: if you add more flush types, put them in the middle! */
+
+/* Modes for buf_page_get_gen */
+#define BUF_GET             10  /* get always */
+#define BUF_GET_IF_IN_POOL  11  /* get if in pool */
+#define BUF_GET_NOWAIT      12  /* get if can set the latch without waiting */
+#define BUF_GET_NO_LATCH    14  /* get and bufferfix, but set no latch; we have separated this case, because it is error-prone programming not to set a latch, and it should be used with care */
+
+/* Modes for buf_page_get_known_nowait */
+#define BUF_MAKE_YOUNG  51
+#define BUF_KEEP_OLD    52
+
+/* Magic value to use instead of checksums when they are disabled */
+#define BUF_NO_CHECKSUM_MAGIC 0xDEADBEEFUL
+
+
+/* The buffer control block structure */
+
+struct buf_block_struct{
+
+        /* 1. General fields */
+
+        ulint           magic_n;        /* magic number to check */
+        ulint           state;          /* state of the control block:
+                                        BUF_BLOCK_NOT_USED, ...; changing
+                                        this is only allowed when a thread
+                                        has BOTH the buffer pool mutex AND
+                                        block->mutex locked */
+        byte*           frame;          /* pointer to buffer frame which
+                                        is of size UNIV_PAGE_SIZE, and
+                                        aligned to an address divisible by
+                                        UNIV_PAGE_SIZE; if AWE is used, this
+                                        will be NULL for the pages which are
+                                        currently not mapped into the virtual
+                                        address space window of the buffer
+                                        pool */
+        os_awe_t*       awe_info;       /* if AWE is used, then an array of
+                                        awe page infos for
+                                        UNIV_PAGE_SIZE / OS_AWE_X86_PAGE_SIZE
+                                        (normally = 4) physical memory
+                                        pages; otherwise NULL */
+        ulint           space;          /* space id of the page */
+        ulint           offset;         /* page number within the space */
+        ulint           lock_hash_val;  /* hashed value of the page address
+                                        in the record lock hash table */
+        mutex_t         mutex;          /* mutex protecting this block:
+                                        state (also protected by the buffer
+                                        pool mutex), io_fix, buf_fix_count,
+                                        and accessed; we introduce this new
+                                        mutex in InnoDB-5.1 to relieve
+                                        contention on the buffer pool mutex */
+        rw_lock_t       lock;           /* read-write lock of the buffer
+                                        frame */
+        buf_block_t*    hash;           /* node used in chaining to the page
+                                        hash table */
+        ibool           check_index_page_at_flush;
+                                        /* TRUE if we know that this is
+                                        an index page, and want the database
+                                        to check its consistency before flush;
+                                        note that there may be pages in the
+                                        buffer pool which are index pages,
+                                        but this flag is not set because
+                                        we do not keep track of all pages */
+        /* 2. Page flushing fields */
+
+        UT_LIST_NODE_T(buf_block_t) flush_list;
+                                        /* node of the modified, not yet
+                                        flushed blocks list */
+        dulint          newest_modification;
+                                        /* log sequence number of the youngest
+                                        modification to this block, zero if
+                                        not modified */
+        dulint          oldest_modification;
+                                        /* log sequence number of the START of
+                                        the log entry written of the oldest
+                                        modification to this block which has
+                                        not yet been flushed on disk; zero if
+                                        all modifications are on disk */
+        ulint           flush_type;     /* if this block is currently being
+                                        flushed to disk, this tells the
+                                        flush_type: BUF_FLUSH_LRU or
+                                        BUF_FLUSH_LIST */
+
+        /* 3. LRU replacement algorithm fields */
+
+        UT_LIST_NODE_T(buf_block_t) free;
+                                        /* node of the free block list */
+        ibool           in_free_list;   /* TRUE if in the free list; used in
+                                        debugging */
+        UT_LIST_NODE_T(buf_block_t) LRU;
+                                        /* node of the LRU list */
+        UT_LIST_NODE_T(buf_block_t) awe_LRU_free_mapped;
+                                        /* in the AWE version node in the
+                                        list of free and LRU blocks which are
+                                        mapped to a frame */
+        ibool           in_LRU_list;    /* TRUE of the page is in the LRU list;
+                                        used in debugging */
+        ulint           LRU_position;   /* value which monotonically
+                                        decreases (or may stay constant if
+                                        the block is in the old blocks) toward
+                                        the end of the LRU list, if the pool
+                                        ulint_clock has not wrapped around:
+                                        NOTE that this value can only be used
+                                        in heuristic algorithms, because of
+                                        the possibility of a wrap-around! */
+        ulint           freed_page_clock;/* the value of freed_page_clock
+                                        of the buffer pool when this block was
+                                        the last time put to the head of the
+                                        LRU list; a thread is allowed to
+                                        read this for heuristic purposes
+                                        without holding any mutex or latch */
+        ibool           old;            /* TRUE if the block is in the old
+                                        blocks in the LRU list */
+        ibool           accessed;       /* TRUE if the page has been accessed
+                                        while in the buffer pool: read-ahead
+                                        may read in pages which have not been
+                                        accessed yet; this is protected by
+                                        block->mutex; a thread is allowed to
+                                        read this for heuristic purposes
+                                        without holding any mutex or latch */
+        ulint           buf_fix_count;  /* count of how manyfold this block
+                                        is currently bufferfixed; this is
+                                        protected by block->mutex */
+        ulint           io_fix;         /* if a read is pending to the frame,
+                                        io_fix is BUF_IO_READ, in the case
+                                        of a write BUF_IO_WRITE, otherwise 0;
+                                        this is protected by block->mutex */
+        /* 4. Optimistic search field */
+
+        dulint          modify_clock;   /* this clock is incremented every
+                                        time a pointer to a record on the
+                                        page may become obsolete; this is
+                                        used in the optimistic cursor
+                                        positioning: if the modify clock has
+                                        not changed, we know that the pointer
+                                        is still valid; this field may be
+                                        changed if the thread (1) owns the
+                                        pool mutex and the page is not
+                                        bufferfixed, or (2) the thread has an
+                                        x-latch on the block */
+
+        /* 5. Hash search fields: NOTE that the first 4 fields are NOT
+        protected by any semaphore! */
+
+        ulint           n_hash_helps;   /* counter which controls building
+                                        of a new hash index for the page */
+        ulint           n_fields;       /* recommended prefix length for hash
+                                        search: number of full fields */
+        ulint           n_bytes;        /* recommended prefix: number of bytes
+                                        in an incomplete field */
+        ibool           left_side;      /* TRUE or FALSE, depending on
+                                        whether the leftmost record of several
+                                        records with the same prefix should be
+                                        indexed in the hash index */
+
+        /* These 6 fields may only be modified when we have
+        an x-latch on btr_search_latch AND
+        a) we are holding an s-latch or x-latch on block->lock or
+        b) we know that block->buf_fix_count == 0.
+
+        An exception to this is when we init or create a page
+        in the buffer pool in buf0buf.c. */
+		
+        ibool           is_hashed;      /* TRUE if hash index has already been
+                                        built on this page; note that it does
+                                        not guarantee that the index is
+                                        complete, though: there may have been
+                                        hash collisions, record deletions,
+                                        etc. */
+        ulint           n_pointers;     /* used in debugging: the number of
+                                        pointers in the adaptive hash index
+                                        pointing to this frame */
+        ulint           curr_n_fields;  /* prefix length for hash indexing:
+                                        number of full fields */
+        ulint           curr_n_bytes;   /* number of bytes in hash indexing */
+        ibool           curr_left_side; /* TRUE or FALSE in hash indexing */
+        dict_index_t*   index;          /* Index for which the adaptive
+                                        hash index has been created. */
+        /* 6. Debug fields */
+#ifdef UNIV_SYNC_DEBUG
+        rw_lock_t       debug_latch;    /* in the debug version, each thread
+                                        which bufferfixes the block acquires
+                                        an s-latch here; so we can use the
+                                        debug utilities in sync0rw */
+#endif
+        ibool           file_page_was_freed;
+                                        /* this is set to TRUE when fsp
+                                        frees a page in buffer pool */
+};
+
+#define BUF_BLOCK_MAGIC_N       41526563
+
+/* The buffer pool structure. NOTE! The definition appears here only for
+other modules of this directory (buf) to see it. Do not use from outside! */
+
+struct buf_pool_struct{
+
+        /* 1. General fields */
+
+        mutex_t         mutex;          /* mutex protecting the buffer pool
+                                        struct and control blocks, except the
+                                        read-write lock in them */
+        byte*           frame_mem;      /* pointer to the memory area which
+                                        was allocated for the frames; in AWE
+                                        this is the virtual address space
+                                        window where we map pages stored
+                                        in physical memory */
+        byte*           frame_zero;     /* pointer to the first buffer frame:
+                                        this may differ from frame_mem, because
+                                        this is aligned by the frame size */
+        byte*           high_end;       /* pointer to the end of the buffer
+                                        frames */
+        ulint           n_frames;       /* number of frames */
+        buf_block_t*    blocks;         /* array of buffer control blocks */
+        buf_block_t**   blocks_of_frames;/* inverse mapping which can be used
+                                        to retrieve the buffer control block
+                                        of a frame; this is an array which
+                                        lists the blocks of frames in the
+                                        order frame_zero,
+                                        frame_zero + UNIV_PAGE_SIZE, ...
+                                        a control block is always assigned
+                                        for each frame, even if the frame does
+                                        not contain any data; note that in AWE
+                                        there are more control blocks than
+                                        buffer frames */
+        os_awe_t*       awe_info;       /* if AWE is used, AWE info for the
+                                        physical 4 kB memory pages associated
+                                        with buffer frames */
+        ulint           max_size;       /* number of control blocks ==
+                                        maximum pool size in pages */
+        ulint           curr_size;      /* current pool size in pages;
+                                        currently always the same as
+                                        max_size */
+        hash_table_t*   page_hash;      /* hash table of the file pages */
+
+        ulint           n_pend_reads;   /* number of pending read operations */
+
+        time_t          last_printout_time; /* when buf_print was last time
+                                        called */
+        ulint           n_pages_read;   /* number read operations */
+        ulint           n_pages_written;/* number write operations */
+        ulint           n_pages_created;/* number of pages created in the pool
+                                        with no read */
+        ulint           n_page_gets;    /* number of page gets performed;
+                                        also successful searches through
+                                        the adaptive hash index are
+                                        counted as page gets; this field
+                                        is NOT protected by the buffer
+                                        pool mutex */
+        ulint           n_pages_awe_remapped; /* if AWE is enabled, the
+                                        number of remaps of blocks to
+                                        buffer frames */
+        ulint           n_page_gets_old;/* n_page_gets when buf_print was
+                                        last time called: used to calculate
+                                        hit rate */
+        ulint           n_pages_read_old;/* n_pages_read when buf_print was
+                                        last time called */
+        ulint           n_pages_written_old;/* number write operations */
+        ulint           n_pages_created_old;/* number of pages created in
+                                        the pool with no read */
+        ulint           n_pages_awe_remapped_old;
+        /* 2. Page flushing algorithm fields */
+
+        UT_LIST_BASE_NODE_T(buf_block_t) flush_list;
+                                        /* base node of the modified block
+                                        list */
+        ibool           init_flush[BUF_FLUSH_LIST + 1];
+                                        /* this is TRUE when a flush of the
+                                        given type is being initialized */
+        ulint           n_flush[BUF_FLUSH_LIST + 1];
+                                        /* this is the number of pending
+                                        writes in the given flush type */
+        os_event_t      no_flush[BUF_FLUSH_LIST + 1];
+                                        /* this is in the set state when there
+                                        is no flush batch of the given type
+                                        running */
+        ulint           ulint_clock;    /* a sequence number used to count
+                                        time. NOTE! This counter wraps
+                                        around at 4 billion (if ulint ==
+                                        32 bits)! */
+        ulint           freed_page_clock;/* a sequence number used to count the
+                                        number of buffer blocks removed from
+                                        the end of the LRU list; NOTE that
+                                        this counter may wrap around at 4
+                                        billion! A thread is allowed to
+                                        read this for heuristic purposes
+                                        without holding any mutex or latch */
+        ulint           LRU_flush_ended;/* when an LRU flush ends for a page,
+                                        this is incremented by one; this is
+                                        set to zero when a buffer block is
+                                        allocated */
+
+        /* 3. LRU replacement algorithm fields */
+
+        UT_LIST_BASE_NODE_T(buf_block_t) free;
+                                        /* base node of the free block list;
+                                        in the case of AWE, at the start are
+                                        always free blocks for which the
+                                        physical memory is mapped to a frame */
+        UT_LIST_BASE_NODE_T(buf_block_t) LRU;
+                                        /* base node of the LRU list */
+        buf_block_t*    LRU_old;        /* pointer to the about 3/8 oldest
+                                        blocks in the LRU list; NULL if LRU
+                                        length less than BUF_LRU_OLD_MIN_LEN */
+        ulint           LRU_old_len;    /* length of the LRU list from
+                                        the block to which LRU_old points
+                                        onward, including that block;
+                                        see buf0lru.c for the restrictions
+                                        on this value; not defined if
+                                        LRU_old == NULL */
+        UT_LIST_BASE_NODE_T(buf_block_t) awe_LRU_free_mapped;
+                                        /* list of those blocks which are
+                                        in the LRU list or the free list, and
+                                        where the page is mapped to a frame;
+                                        thus, frames allocated, e.g., to the
+                                        locki table, are not in this list */
+};
+
+/* States of a control block */
+#define BUF_BLOCK_NOT_USED      211     /* is in the free list */
+#define BUF_BLOCK_READY_FOR_USE 212     /* when buf_get_free_block returns
+                                        a block, it is in this state */
+#define BUF_BLOCK_FILE_PAGE     213     /* contains a buffered file page */
+#define BUF_BLOCK_MEMORY        214     /* contains some main memory object */
+#define BUF_BLOCK_REMOVE_HASH   215     /* hash index should be removed
+                                        before putting to the free list */
+
+/* Io_fix states of a control block; these must be != 0 */
+#define BUF_IO_READ             561
+#define BUF_IO_WRITE            562
+
+/************************************************************************
+Let us list the consistency conditions for different control block states.
+
+NOT_USED:       is in free list, not in LRU list, not in flush list, nor
+                page hash table
+READY_FOR_USE:  is not in free list, LRU list, or flush list, nor page
+                hash table
+MEMORY:         is not in free list, LRU list, or flush list, nor page
+                hash table
+FILE_PAGE:      space and offset are defined, is in page hash table
+                if io_fix == BUF_IO_WRITE,
+                        pool: no_flush[block->flush_type] is in reset state,
+                        pool: n_flush[block->flush_type] > 0
+
+                (1) if buf_fix_count == 0, then
+                        is in LRU list, not in free list
+                        is in flush list,
+                                if and only if oldest_modification > 0
+                        is x-locked,
+                                if and only if io_fix == BUF_IO_READ
+                        is s-locked,
+                                if and only if io_fix == BUF_IO_WRITE
+
+                (2) if buf_fix_count > 0, then
+                        is not in LRU list, not in free list
+                        is in flush list,
+                                if and only if oldest_modification > 0
+                        if io_fix == BUF_IO_READ,
+                                is x-locked
+                        if io_fix == BUF_IO_WRITE,
+                                is s-locked
+
+State transitions:
+
+NOT_USED => READY_FOR_USE
+READY_FOR_USE => MEMORY
+READY_FOR_USE => FILE_PAGE
+MEMORY => NOT_USED
+FILE_PAGE => NOT_USED   NOTE: This transition is allowed if and only if
+                                (1) buf_fix_count == 0,
+                                (2) oldest_modification == 0, and
+                                (3) io_fix == 0.
+*/
+
+
+
+/*
+                IMPLEMENTATION OF THE BUFFER POOL
+                =================================
+
+Performance improvement:
+------------------------
+Thread scheduling in NT may be so slow that the OS wait mechanism should
+not be used even in waiting for disk reads to complete.
+Rather, we should put waiting query threads to the queue of
+waiting jobs, and let the OS thread do something useful while the i/o
+is processed. In this way we could remove most OS thread switches in
+an i/o-intensive benchmark like TPC-C.
+
+A possibility is to put a user space thread library between the database
+and NT. User space thread libraries might be very fast.
+
+SQL Server 7.0 can be configured to use 'fibers' which are lightweight
+threads in NT. These should be studied.
+
+                Buffer frames and blocks
+                ------------------------
+Following the terminology of Gray and Reuter, we call the memory
+blocks where file pages are loaded buffer frames. For each buffer
+frame there is a control block, or shortly, a block, in the buffer
+control array. The control info which does not need to be stored
+in the file along with the file page, resides in the control block.
+
+                Buffer pool struct
+                ------------------
+The buffer buf_pool contains a single mutex which protects all the
+control data structures of the buf_pool. The content of a buffer frame is
+protected by a separate read-write lock in its control block, though.
+These locks can be locked and unlocked without owning the buf_pool mutex.
+The OS events in the buf_pool struct can be waited for without owning the
+buf_pool mutex.
+
+/*
+                IMPLEMENTATION OF THE BUFFER POOL
+                =================================
+
+Performance improvement:
+------------------------
+Thread scheduling in NT may be so slow that the OS wait mechanism should
+not be used even in waiting for disk reads to complete.
+Rather, we should put waiting query threads to the queue of
+waiting jobs, and let the OS thread do something useful while the i/o
+is processed. In this way we could remove most OS thread switches in
+an i/o-intensive benchmark like TPC-C.
+
+A possibility is to put a user space thread library between the database
+and NT. User space thread libraries might be very fast.
+
+SQL Server 7.0 can be configured to use 'fibers' which are lightweight
+threads in NT. These should be studied.
+
+                Buffer frames and blocks
+                ------------------------
+Following the terminology of Gray and Reuter, we call the memory
+blocks where file pages are loaded buffer frames. For each buffer
+frame there is a control block, or shortly, a block, in the buffer
+control array. The control info which does not need to be stored
+in the file along with the file page, resides in the control block.
+
+                Buffer pool struct
+                ------------------
+The buffer buf_pool contains a single mutex which protects all the
+control data structures of the buf_pool. The content of a buffer frame is
+protected by a separate read-write lock in its control block, though.
+These locks can be locked and unlocked without owning the buf_pool mutex.
+The OS events in the buf_pool struct can be waited for without owning the
+buf_pool mutex.
+
+The buf_pool mutex is a hot-spot in main memory, causing a lot of
+memory bus traffic on multiprocessor systems when processors
+alternately access the mutex. On our Pentium, the mutex is accessed
+maybe every 10 microseconds. We gave up the solution to have mutexes
+for each control block, for instance, because it seemed to be
+complicated.
+
+A solution to reduce mutex contention of the buf_pool mutex is to
+create a separate mutex for the page hash table. On Pentium,
+accessing the hash table takes 2 microseconds, about half
+of the total buf_pool mutex hold time.
+
+                Control blocks
+                --------------
+
+The control block contains, for instance, the bufferfix count
+which is incremented when a thread wants a file page to be fixed
+in a buffer frame. The bufferfix operation does not lock the
+contents of the frame, however. For this purpose, the control
+block contains a read-write lock.
+
+The buffer frames have to be aligned so that the start memory
+address of a frame is divisible by the universal page size, which
+is a power of two.
+
+We intend to make the buffer buf_pool size on-line reconfigurable,
+that is, the buf_pool size can be changed without closing the database.
+Then the database administarator may adjust it to be bigger
+at night, for example. The control block array must
+contain enough control blocks for the maximum buffer buf_pool size
+which is used in the particular database.
+If the buf_pool size is cut, we exploit the virtual memory mechanism of
+the OS, and just refrain from using frames at high addresses. Then the OS
+can swap them to disk.
+
+The control blocks containing file pages are put to a hash table
+according to the file address of the page.
+We could speed up the access to an individual page by using
+"pointer swizzling": we could replace the page references on
+non-leaf index pages by direct pointers to the page, if it exists
+in the buf_pool. We could make a separate hash table where we could
+chain all the page references in non-leaf pages residing in the buf_pool,
+using the page reference as the hash key,
+and at the time of reading of a page update the pointers accordingly.
+Drawbacks of this solution are added complexity and,
+possibly, extra space required on non-leaf pages for memory pointers.
+A simpler solution is just to speed up the hash table mechanism
+in the database, using tables whose size is a power of 2.
+
+                Lists of blocks
+                ---------------
+
+There are several lists of control blocks. The free list contains
+blocks which are currently not used.
+
+The LRU-list contains all the blocks holding a file page
+except those for which the bufferfix count is non-zero.
+The pages are in the LRU list roughly in the order of the last
+access to the page, so that the oldest pages are at the end of the
+list. We also keep a pointer to near the end of the LRU list,
+which we can use when we want to artificially age a page in the
+buf_pool. This is used if we know that some page is not needed
+again for some time: we insert the block right after the pointer,
+causing it to be replaced sooner than would noramlly be the case.
+Currently this aging mechanism is used for read-ahead mechanism
+of pages, and it can also be used when there is a scan of a full
+table which cannot fit in the memory. Putting the pages near the
+of the LRU list, we make sure that most of the buf_pool stays in the
+main memory, undisturbed.
+
+The chain of modified blocks contains the blocks
+holding file pages that have been modified in the memory
+but not written to disk yet. The block with the oldest modification
+which has not yet been written to disk is at the end of the chain.
+
+                Loading a file page
+                -------------------
+
+First, a victim block for replacement has to be found in the
+buf_pool. It is taken from the free list or searched for from the
+end of the LRU-list. An exclusive lock is reserved for the frame,
+the io_fix field is set in the block fixing the block in buf_pool,
+and the io-operation for loading the page is queued. The io-handler thread
+releases the X-lock on the frame and resets the io_fix field
+when the io operation completes.
+
+A thread may request the above operation using the function
+buf_page_get(). It may then continue to request a lock on the frame.
+The lock is granted when the io-handler releases the x-lock.
+
+                Read-ahead
+                ----------
+
+The read-ahead mechanism is intended to be intelligent and
+isolated from the semantically higher levels of the database
+index management. From the higher level we only need the
+information if a file page has a natural successor or
+predecessor page. On the leaf level of a B-tree index,
+these are the next and previous pages in the natural
+order of the pages.
+
+Let us first explain the read-ahead mechanism when the leafs
+of a B-tree are scanned in an ascending or descending order.
+When a read page is the first time referenced in the buf_pool,
+the buffer manager checks if it is at the border of a so-called
+linear read-ahead area. The tablespace is divided into these
+areas of size 64 blocks, for example. So if the page is at the
+border of such an area, the read-ahead mechanism checks if
+all the other blocks in the area have been accessed in an
+ascending or descending order. If this is the case, the system
+looks at the natural successor or predecessor of the page,
+checks if that is at the border of another area, and in this case
+issues read-requests for all the pages in that area. Maybe
+we could relax the condition that all the pages in the area
+have to be accessed: if data is deleted from a table, there may
+appear holes of unused pages in the area.
+
+A different read-ahead mechanism is used when there appears
+to be a random access pattern to a file.
+If a new page is referenced in the buf_pool, and several pages
+of its random access area (for instance, 32 consecutive pages
+in a tablespace) have recently been referenced, we may predict
+that the whole area may be needed in the near future, and issue
+the read requests for the whole area.
+
+                AWE implementation
+                ------------------
+
+By a 'block' we mean the buffer header of type buf_block_t. By a 'page'
+we mean the physical 16 kB memory area allocated from RAM for that block.
+By a 'frame' we mean a 16 kB area in the virtual address space of the
+process, in the frame_mem of buf_pool.
+
+We can map pages to the frames of the buffer pool.
+
+1) A buffer block allocated to use as a non-data page, e.g., to the lock
+table, is always mapped to a frame.
+2) A bufferfixed or io-fixed data page is always mapped to a frame.
+3) When we need to map a block to frame, we look from the list
+awe_LRU_free_mapped and try to unmap its last block, but note that
+bufferfixed or io-fixed pages cannot be unmapped.
+4) For every frame in the buffer pool there is always a block whose page is
+mapped to it. When we create the buffer pool, we map the first elements
+in the free list to the frames.
+5) When we have AWE enabled, we disable adaptive hash indexes.
+*/

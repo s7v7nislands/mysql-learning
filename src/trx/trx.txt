@@ -1,0 +1,275 @@
+include/trx0sys.h
+
+/* The automatically created system rollback segment has this id */
+#define TRX_SYS_SYSTEM_RSEG_ID  0
+
+/* Space id and page no where the trx system file copy resides */
+#define TRX_SYS_SPACE   0   /* the SYSTEM tablespace */
+#define TRX_SYS_PAGE_NO FSP_TRX_SYS_PAGE_NO
+
+/* The offset of the transaction system header on the page */
+#define TRX_SYS     FSEG_PAGE_DATA
+
+/* Transaction system header */
+/*-------------------------------------------------------------*/
+#define TRX_SYS_TRX_ID_STORE    0   /* the maximum trx id or trx number modulo TRX_SYS_TRX_ID_UPDATE_MARGIN written to a file page by any transaction; the assignment of transaction ids continues from this number rounded up by .._MARGIN plus .._MARGIN when the database is started */
+#define TRX_SYS_FSEG_HEADER     8   /* segment header for the tablespace segment the trx system is created into */
+#define TRX_SYS_RSEGS           (8 + FSEG_HEADER_SIZE)  /* the start of the array of rollback segment specification slots */
+/*-------------------------------------------------------------*/
+/* Max number of rollback segments: the number of segment specification slots
+in the transaction system array; rollback segment id must fit in one byte,
+therefore 256; each slot is currently 8 bytes in size */
+#define TRX_SYS_N_RSEGS     256
+
+#define TRX_SYS_MYSQL_LOG_NAME_LEN  512
+#define TRX_SYS_MYSQL_LOG_MAGIC_N   873422344
+
+/* The offset of the MySQL replication info in the trx system header;
+this contains the same fields as TRX_SYS_MYSQL_LOG_INFO below */
+#define TRX_SYS_MYSQL_MASTER_LOG_INFO   (UNIV_PAGE_SIZE - 2000)
+
+/* The offset of the MySQL binlog offset info in the trx system header */
+#define TRX_SYS_MYSQL_LOG_INFO          (UNIV_PAGE_SIZE - 1000)
+#define TRX_SYS_MYSQL_LOG_MAGIC_N_FLD   0   /* magic number which shows if we have valid data in the MySQL binlog info; the value is ..._MAGIC_N if yes */
+#define TRX_SYS_MYSQL_LOG_OFFSET_HIGH   4   /* high 4 bytes of the offset within that file */
+#define TRX_SYS_MYSQL_LOG_OFFSET_LOW    8   /* low 4 bytes of the offset within that file */
+#define TRX_SYS_MYSQL_LOG_NAME          12  /* MySQL log file name */
+
+/* The offset of the doublewrite buffer header on the trx system header page */
+#define TRX_SYS_DOUBLEWRITE         (UNIV_PAGE_SIZE - 200)
+/*-------------------------------------------------------------*/
+#define TRX_SYS_DOUBLEWRITE_FSEG    0                       /* fseg header of the fseg containing the doublewrite buffer */
+#define TRX_SYS_DOUBLEWRITE_MAGIC   FSEG_HEADER_SIZE        /* 4-byte magic number which shows if we already have created the doublewrite buffer */
+#define TRX_SYS_DOUBLEWRITE_BLOCK1  (4 + FSEG_HEADER_SIZE)  /* page number of the first page in the first sequence of 64 (= FSP_EXTENT_SIZE) consecutive pages in the doublewrite buffer */
+#define TRX_SYS_DOUBLEWRITE_BLOCK2  (8 + FSEG_HEADER_SIZE)  /* page number of the first page in the second sequence of 64 consecutive pages in the doublewrite buffer */
+#define TRX_SYS_DOUBLEWRITE_REPEAT  12                      /* we repeat the above 3 numbers so that if the trx sys header is half-written to disk, we still may be able to recover the information */
+#define TRX_SYS_DOUBLEWRITE_SPACE_ID_STORED (24 + FSEG_HEADER_SIZE)     /* If this is not yet set to .._N, we must reset the doublewrite buffer, because starting from 4.1.x the space id of a data page is stored to FIL_PAGE_ARCH_LOG_NO_OR_SPACE_NO */
+/*-------------------------------------------------------------*/
+#define TRX_SYS_DOUBLEWRITE_MAGIC_N 536853855
+#define TRX_SYS_DOUBLEWRITE_SPACE_ID_STORED_N 1783657386
+
+note:
+1. doublewrite buffer中的页是其他页的copy。
+
+#define TRX_SYS_DOUBLEWRITE_BLOCK_SIZE  FSP_EXTENT_SIZE
+
+/* Doublewrite control struct */
+struct trx_doublewrite_struct{
+    mutex_t mutex;      /* mutex protecting the first_free field and write_buf */
+    ulint   block1;     /* the page number of the first doublewrite block (64 pages) */
+    ulint   block2;     /* page number of the second block */
+    ulint   first_free; /* first free position in write_buf measured in units of UNIV_PAGE_SIZE */
+    byte*   write_buf;  /* write buffer used in writing to the doublewrite buffer, aligned to an address divisible by UNIV_PAGE_SIZE (which is required by Windows aio) */
+    byte*   write_buf_unaligned;    /* pointer to write_buf, but unaligned */
+    buf_block_t** buf_block_arr;    /* array to store pointers to the buffer blocks which have been cached to write_buf */
+};
+/* The transaction system central memory data structure; protected by the kernel mutex */
+struct trx_sys_struct{
+    dulint      max_trx_id;                     /* The smallest number not yet assigned as a transaction id or transaction number */
+    UT_LIST_BASE_NODE_T(trx_t) trx_list;        /* List of active and committed in memory transactions, sorted on trx id, biggest first */
+    UT_LIST_BASE_NODE_T(trx_t) mysql_trx_list;  /* List of transactions created for MySQL */
+    UT_LIST_BASE_NODE_T(trx_rseg_t) rseg_list;  /* List of rollback segment objects */
+    trx_rseg_t* latest_rseg;                    /* Latest rollback segment in the round-robin assignment of rollback segments to transactions */
+    trx_rseg_t* rseg_array[TRX_SYS_N_RSEGS];    /* Pointer array to rollback segments; NULL if slot not in use */
+    ulint       rseg_history_len;               /* Length of the TRX_RSEG_HISTORY list (update undo logs for committed transactions), protected by rseg->mutex */
+    UT_LIST_BASE_NODE_T(read_view_t) view_list; /* List of read views sorted on trx no, biggest first */
+};
+
+/* When a trx id which is zero modulo this number (which must be a power of
+two) is assigned, the field TRX_SYS_TRX_ID_STORE on the transaction system
+page is updated */
+#define TRX_SYS_TRX_ID_WRITE_MARGIN 256
+
+
+include/trx0rseg.h
+
+/* Number of undo log slots in a rollback segment file copy */
+#define TRX_RSEG_N_SLOTS    1024
+
+/* Maximum number of transactions supported by a single rollback segment */
+#define TRX_RSEG_MAX_N_TRXS (TRX_RSEG_N_SLOTS / 2)
+
+/* The rollback segment memory object */
+struct trx_rseg_struct{
+    /*--------------------------------------------------------*/
+    ulint       id;         /* rollback segment id == the index of its slot in the trx system file copy */
+    mutex_t     mutex;      /* mutex protecting the fields in this struct except id; NOTE that the latching order must always be kernel mutex -> rseg mutex */
+    ulint       space;      /* space where the rollback segment is header is placed */
+    ulint       page_no;    /* page number of the rollback segment header */
+    ulint       max_size;   /* maximum allowed size in pages */
+    ulint       curr_size;  /* current size in pages */
+    /*--------------------------------------------------------*/
+    /* Fields for update undo logs */
+    UT_LIST_BASE_NODE_T(trx_undo_t) update_undo_list;   /* List of update undo logs */
+    UT_LIST_BASE_NODE_T(trx_undo_t) update_undo_cached; /* List of update undo log segments cached for fast reuse */
+    /*--------------------------------------------------------*/
+    /* Fields for insert undo logs */
+    UT_LIST_BASE_NODE_T(trx_undo_t) insert_undo_list;   /* List of insert undo logs */
+    UT_LIST_BASE_NODE_T(trx_undo_t) insert_undo_cached; /* List of insert undo log segments cached for fast reuse */
+    /*--------------------------------------------------------*/
+    ulint       last_page_no;   /* Page number of the last not yet purged log header in the history list; FIL_NULL if all list purged */
+    ulint       last_offset;    /* Byte offset of the last not yet purged log header */
+    dulint      last_trx_no;    /* Transaction number of the last not yet purged log */
+    ibool       last_del_marks; /* TRUE if the last not yet purged log needs purging */
+    /*--------------------------------------------------------*/
+    UT_LIST_NODE_T(trx_rseg_t) rseg_list;   /* the list of the rollback segment memory objects */
+};
+
+/* Undo log segment slot in a rollback segment header */
+/*-------------------------------------------------------------*/
+#define TRX_RSEG_SLOT_PAGE_NO   0   /* Page number of the header page of an undo log segment */
+/*-------------------------------------------------------------*/
+/* Slot size */
+#define TRX_RSEG_SLOT_SIZE      4
+
+/* The offset of the rollback segment header on its page */
+#define TRX_RSEG        FSEG_PAGE_DATA
+
+/* Transaction rollback segment header */
+/*-------------------------------------------------------------*/
+#define TRX_RSEG_MAX_SIZE       0   /* Maximum allowed size for rollback segment in pages */
+#define TRX_RSEG_HISTORY_SIZE   4   /* Number of file pages occupied by the logs in the history list */
+#define TRX_RSEG_HISTORY        8   /* The update undo logs for committed transactions */
+#define TRX_RSEG_FSEG_HEADER    (8 + FLST_BASE_NODE_SIZE)                       /* Header for the file segment where this page is placed */
+#define TRX_RSEG_UNDO_SLOTS     (8 + FLST_BASE_NODE_SIZE + FSEG_HEADER_SIZE)    /* Undo log segment slots */
+/*-------------------------------------------------------------*/
+
+/* Number of undo log slots in a rollback segment file copy */
+#define TRX_RSEG_N_SLOTS        1024
+
+/* Maximum number of transactions supported by a single rollback segment */
+#define TRX_RSEG_MAX_N_TRXS     (TRX_RSEG_N_SLOTS / 2)
+
+note:
+1. 系统表空间中的FSP_FIRST_RSEG_PAGE_NO页面的格式。
+
+
+
+/* Types of an undo log segment */
+#define TRX_UNDO_INSERT         1       /* contains undo entries for inserts */
+#define TRX_UNDO_UPDATE         2       /* contains undo entries for updates
+                                        and delete markings: in short,
+                                        modifys (the name 'UPDATE' is a
+                                        historical relic) */
+/* States of an undo log segment */
+#define TRX_UNDO_ACTIVE         1       /* contains an undo log of an active
+                                        transaction */
+#define TRX_UNDO_CACHED         2       /* cached for quick reuse */
+#define TRX_UNDO_TO_FREE        3       /* insert undo segment can be freed */
+#define TRX_UNDO_TO_PURGE       4       /* update undo segment will not be
+                                        reused: it can be freed in purge when
+                                        all undo data in it is removed */
+#define TRX_UNDO_PREPARED       5       /* contains an undo log of an
+                                        prepared transaction */
+									
+/* The offset of the undo log page header on pages of the undo log */
+#define TRX_UNDO_PAGE_HDR       FSEG_PAGE_DATA
+/*-------------------------------------------------------------*/
+/* Transaction undo log page header offsets */
+#define TRX_UNDO_PAGE_TYPE      0       /* TRX_UNDO_INSERT or
+                                        TRX_UNDO_UPDATE */
+#define TRX_UNDO_PAGE_START     2       /* Byte offset where the undo log
+                                        records for the LATEST transaction
+                                        start on this page (remember that
+                                        in an update undo log, the first page
+                                        can contain several undo logs) */
+#define TRX_UNDO_PAGE_FREE      4       /* On each page of the undo log this
+                                        field contains the byte offset of the
+                                        first free byte on the page */
+#define TRX_UNDO_PAGE_NODE      6       /* The file list node in the chain
+                                        of undo log pages */
+/*-------------------------------------------------------------*/
+#define TRX_UNDO_PAGE_HDR_SIZE  (6 + FLST_NODE_SIZE)
+
+/* An update undo segment with just one page can be reused if it has
+< this number bytes used; we must leave space at least for one new undo
+log header on the page */
+
+#define TRX_UNDO_PAGE_REUSE_LIMIT       (3 * UNIV_PAGE_SIZE / 4)
+
+/* An update undo log segment may contain several undo logs on its first page
+if the undo logs took so little space that the segment could be cached and
+reused. All the undo log headers are then on the first page, and the last one
+owns the undo log records on subsequent pages if the segment is bigger than
+one page. If an undo log is stored in a segment, then on the first page it is
+allowed to have zero undo records, but if the segment extends to several
+pages, then all the rest of the pages must contain at least one undo log
+record. */
+
+/* The offset of the undo log segment header on the first page of the undo
+log segment */
+
+#define TRX_UNDO_SEG_HDR        (TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_HDR_SIZE)
+/*-------------------------------------------------------------*/
+#define TRX_UNDO_STATE          0       /* TRX_UNDO_ACTIVE, ... */
+#define TRX_UNDO_LAST_LOG       2       /* Offset of the last undo log header
+                                        on the segment header page, 0 if
+                                        none */
+#define TRX_UNDO_FSEG_HEADER    4       /* Header for the file segment which
+                                        the undo log segment occupies */
+#define TRX_UNDO_PAGE_LIST      (4 + FSEG_HEADER_SIZE)
+                                        /* Base node for the list of pages in
+                                        the undo log segment; defined only on
+                                        the undo log segment's first page */
+/*-------------------------------------------------------------*/
+/* Size of the undo log segment header */
+#define TRX_UNDO_SEG_HDR_SIZE   (4 + FSEG_HEADER_SIZE + FLST_BASE_NODE_SIZE)
+
+/* The undo log header. There can be several undo log headers on the first
+page of an update undo log segment. */
+/*-------------------------------------------------------------*/
+#define TRX_UNDO_TRX_ID         0       /* Transaction id */
+#define TRX_UNDO_TRX_NO         8       /* Transaction number of the
+                                        transaction; defined only if the log
+                                        is in a history list */
+#define TRX_UNDO_DEL_MARKS      16      /* Defined only in an update undo
+                                        log: TRUE if the transaction may have
+                                        done delete markings of records, and
+                                        thus purge is necessary */
+#define TRX_UNDO_LOG_START      18      /* Offset of the first undo log record
+                                        of this log on the header page; purge
+                                        may remove undo log record from the
+                                        log start, and therefore this is not
+                                        necessarily the same as this log
+                                        header end offset */
+#define TRX_UNDO_XID_EXISTS     20      /* TRUE if undo log header includes
+                                        X/Open XA transaction identification
+                                        XID */
+#define TRX_UNDO_DICT_TRANS     21      /* TRUE if the transaction is a table
+                                        create, index create, or drop
+                                        transaction: in recovery
+                                        the transaction cannot be rolled back
+                                        in the usual way: a 'rollback' rather
+                                        means dropping the created or dropped
+                                        table, if it still exists */
+#define TRX_UNDO_TABLE_ID       22      /* Id of the table if the preceding
+                                        field is TRUE */
+#define TRX_UNDO_NEXT_LOG       30      /* Offset of the next undo log header
+                                        on this page, 0 if none */
+#define TRX_UNDO_PREV_LOG       32      /* Offset of the previous undo log
+                                        header on this page, 0 if none */
+#define TRX_UNDO_HISTORY_NODE   34      /* If the log is put to the history
+                                        list, the file list node is here */
+/*-------------------------------------------------------------*/
+#define TRX_UNDO_LOG_OLD_HDR_SIZE (34 + FLST_NODE_SIZE)
+
+/* Note: the writing of the undo log old header is coded by a log record
+MLOG_UNDO_HDR_CREATE or MLOG_UNDO_HDR_REUSE. The appending of an XID to the
+header is logged separately. In this sense, the XID is not really a member
+of the undo log header. TODO: do not append the XID to the log header if XA
+is not needed by the user. The XID wastes about 150 bytes of space in every
+undo log. In the history list we may have millions of undo logs, which means
+quite a large overhead. */
+
+/* X/Open XA Transaction Identification (XID) */
+
+#define TRX_UNDO_XA_FORMAT      (TRX_UNDO_LOG_OLD_HDR_SIZE)
+#define TRX_UNDO_XA_TRID_LEN    (TRX_UNDO_XA_FORMAT + 4)
+#define TRX_UNDO_XA_BQUAL_LEN   (TRX_UNDO_XA_TRID_LEN + 4)
+#define TRX_UNDO_XA_XID         (TRX_UNDO_XA_BQUAL_LEN + 4)
+/*--------------------------------------------------------------*/
+#define TRX_UNDO_LOG_XA_HDR_SIZE (TRX_UNDO_XA_XID + XIDDATASIZE)
+                                /* Total size of the header with the XA XID */
+
+								
+

@@ -1,0 +1,304 @@
+/* NOTE! The structure appears here only for the compiler to know its size.
+Do not use its fields directly! The structure used in the spin lock
+implementation of a read-write lock. Several threads may have a shared lock
+simultaneously in this lock, but only one writer may have an exclusive lock,
+in which case no shared locks are allowed. To prevent starving of a writer
+blocked by readers, a writer may queue for the lock by setting the writer
+field. Then no new readers are allowed in. */
+struct rw_lock_struct {
+        os_event_t      event;  /* Used by sync0arr.c for thread queueing */
+
+#ifdef __WIN__
+        os_event_t      wait_ex_event;  /* This windows specific event is
+                                used by the thread which has set the
+                                lock state to RW_LOCK_WAIT_EX. The
+                                rw_lock design guarantees that this
+                                thread will be the next one to proceed
+                                once the current the event gets
+                                signalled. See LEMMA 2 in sync0sync.c */
+#endif
+
+        ulint   reader_count;   /* Number of readers who have locked this
+                                lock in the shared mode */
+        ulint   writer;         /* This field is set to RW_LOCK_EX if there
+                                is a writer owning the lock (in exclusive
+                                mode), RW_LOCK_WAIT_EX if a writer is
+                                queueing for the lock, and
+                                RW_LOCK_NOT_LOCKED, otherwise. */
+        os_thread_id_t  writer_thread;
+                                /* Thread id of a possible writer thread */
+        ulint   writer_count;   /* Number of times the same thread has
+                                recursively locked the lock in the exclusive
+                                mode */
+        mutex_t mutex;          /* The mutex protecting rw_lock_struct */
+        ulint   pass;           /* Default value 0. This is set to some
+                                value != 0 given by the caller of an x-lock
+                                operation, if the x-lock is to be passed to
+                                another thread to unlock (which happens in
+                                asynchronous i/o). */
+        ulint   waiters;        /* This ulint is set to 1 if there are
+                                waiters (readers or writers) in the global
+                                wait array, waiting for this rw_lock.
+                                Otherwise, == 0. */
+        UT_LIST_NODE_T(rw_lock_t) list;
+                                /* All allocated rw locks are put into a
+                                list */
+
+        const char*     cfile_name;/* File name where lock created */
+        const char*     last_s_file_name;/* File name where last s-locked */
+        const char*     last_x_file_name;/* File name where last x-locked */
+        ibool           writer_is_wait_ex;
+                                /* This is TRUE if the writer field is
+                                RW_LOCK_WAIT_EX; this field is located far
+                                from the memory update hotspot fields which
+                                are at the start of this struct, thus we can
+                                peek this field without causing much memory
+                                bus traffic */
+        unsigned        cline:14;       /* Line where created */
+        unsigned        last_s_line:14; /* Line number where last time s-locked */
+        unsigned        last_x_line:14; /* Line number where last time x-locked */
+        ulint   magic_n;
+};
+
+#define RW_LOCK_MAGIC_N 22643		
+
+
+---------------------------------------------------------------------------------
+struct mutex_struct {
+        os_event_t      event;  /* Used by sync0arr.c for the wait queue */
+        ulint   lock_word;      /* This ulint is the target of the atomic
+                                test-and-set instruction in Win32 */
+#if !defined(_WIN32) || !defined(UNIV_CAN_USE_X86_ASSEMBLER)
+        os_fast_mutex_t
+                os_fast_mutex;  /* In other systems we use this OS mutex
+                                in place of lock_word */
+#endif
+        ulint   waiters;        /* This ulint is set to 1 if there are (or
+                                may be) threads waiting in the global wait
+                                array for this mutex to be released.
+                                Otherwise, this is 0. */
+        UT_LIST_NODE_T(mutex_t) list; /* All allocated mutexes are put into
+                                a list. Pointers to the next and prev. */
+        const char*     cfile_name;/* File name where mutex created */
+        ulint           cline;  /* Line where created */
+
+#ifndef UNIV_HOTBACKUP
+        ulong           count_os_wait; /* count of os_wait */
+#endif /* !UNIV_HOTBACKUP */
+};
+
+/* The global array of wait cells for implementation of the databases own
+mutexes and read-write locks. Appears here for debugging purposes only! */
+
+extern sync_array_t*    sync_primary_wait_array;
+
+/* Constant determining how long spin wait is continued before suspending
+the thread. A value 600 rounds on a 1995 100 MHz Pentium seems to correspond
+to 20 microseconds. */
+
+#define SYNC_SPIN_ROUNDS        srv_n_spin_wait_rounds
+
+/* The number of system calls made in this module. Intended for performance
+monitoring. */
+
+extern  ulint   mutex_system_call_count;
+extern  ulint   mutex_exit_count;
+
+/* This variable is set to TRUE when sync_init is called */
+extern ibool    sync_initialized;
+
+/* Global list of database mutexes (not OS mutexes) created. */
+typedef UT_LIST_BASE_NODE_T(mutex_t)  ut_list_base_node_t;
+extern ut_list_base_node_t  mutex_list;
+
+/* Mutex protecting the mutex_list variable */
+extern mutex_t mutex_list_mutex;
+
+note：
+1. 这里的实现用到了小技巧(TAS指令，memory barrier)。见mutex_enter_func()函数。
+2. 代码中有详细的说明。	
+3. mutex_list_mutex不在mutex_list中。	
+4. sync_init()初始化完成sync_primary_wait_array，mutex_list，rw_lock_list及锁。
+
+
+------------------------------------------------------------------------------
+/*
+                        WAIT ARRAY
+                        ==========
+
+The wait array consists of cells each of which has an
+an operating system event object created for it. The threads
+waiting for a mutex, for example, can reserve a cell
+in the array and suspend themselves to wait for the event
+to become signaled. When using the wait array, remember to make
+sure that some thread holding the synchronization object
+will eventually know that there is a waiter in the array and
+signal the object, to prevent infinite wait.
+Why we chose to implement a wait array? First, to make
+mutexes fast, we had to code our own implementation of them,
+which only in usually uncommon cases resorts to using
+slow operating system primitives. Then we had the choice of
+assigning a unique OS event for each mutex, which would
+be simpler, or using a global wait array. In some operating systems,
+the global wait array solution is more efficient and flexible,
+because we can do with a very small number of OS events,
+say 200. In NT 3.51, allocating events seems to be a quadratic
+algorithm, because 10 000 events are created fast, but
+100 000 events takes a couple of minutes to create.
+
+As of 5.0.30 the above mentioned design is changed. Since now
+OS can handle millions of wait events efficiently, we no longer
+have this concept of each cell of wait array having one event.
+Instead, now the event that a thread wants to wait on is embedded
+in the wait object (mutex or rw_lock). We still keep the global
+wait array for the sake of diagnostics and also to avoid infinite
+wait The error_monitor thread scans the global wait array to signal
+any waiting threads who have missed the signal. */
+
+/* A cell where an individual thread may wait suspended
+until a resource is released. The suspending is implemented
+using an operating system event semaphore. */
+
+struct sync_cell_struct {
+        void*           wait_object;    /* pointer to the object the
+                                        thread is waiting for; if NULL
+                                        the cell is free for use */
+        mutex_t*        old_wait_mutex; /* the latest wait mutex in cell */
+        rw_lock_t*      old_wait_rw_lock;/* the latest wait rw-lock in cell */
+        ulint           request_type;   /* lock type requested on the
+                                        object */
+        const char*     file;           /* in debug version file where
+                                        requested */
+        ulint           line;           /* in debug version line where
+                                        requested */
+        os_thread_id_t  thread;         /* thread id of this waiting
+                                        thread */
+        ibool           waiting;        /* TRUE if the thread has already
+                                        called sync_array_event_wait
+                                        on this cell */
+        ib_longlong     signal_count;   /* We capture the signal_count
+                                        of the wait_object when we
+                                        reset the event. This value is
+                                        then passed on to os_event_wait
+                                        and we wait only if the event
+                                        has not been signalled in the
+                                        period between the reset and
+                                        wait call. */
+        time_t          reservation_time;/* time when the thread reserved
+                                        the wait cell */
+};
+
+/* NOTE: It is allowed for a thread to wait
+for an event allocated for the array without owning the
+protecting mutex (depending on the case: OS or database mutex), but
+all changes (set or reset) to the state of the event must be made
+while owning the mutex. */
+struct sync_array_struct {
+        ulint           n_reserved;     /* number of currently reserved
+                                        cells in the wait array */
+        ulint           n_cells;        /* number of cells in the
+                                        wait array */
+        sync_cell_t*    array;          /* pointer to wait array */
+        ulint           protection;     /* this flag tells which
+                                        mutex protects the data */
+        mutex_t         mutex;          /* possible database mutex
+                                        protecting this data structure */
+        os_mutex_t      os_mutex;       /* Possible operating system mutex
+                                        protecting the data structure.
+                                        As this data structure is used in
+                                        constructing the database mutex,
+                                        to prevent infinite recursion
+                                        in implementation, we fall back to
+                                        an OS mutex. */
+        ulint           sg_count;       /* count of how many times an
+                                        object has been signalled */
+        ulint           res_count;      /* count of cell reservations
+                                        since creation of the array */
+};
+
+
+note:
+1. 在innodb中用sync_array来保存等待的同步对象。
+2. sync_arr_wake_threads_if_sema_free() 用于mutex_exit()函数调用后理论上可能的未正确唤醒。
+	/* In case mutex_exit is not a memory barrier, it is
+        theoretically possible some threads are left waiting though
+        the semaphore is already released. Wake up those threads: */ srv/srv0srv.c
+		
+	/* A problem: we assume that mutex_reset_lock word
+        is a memory barrier, that is when we read the waiters
+        field next, the read must be serialized in memory
+        after the reset. A speculative processor might
+        perform the read first, which could leave a waiting
+        thread hanging indefinitely.
+
+        Our current solution call every second
+        sync_arr_wake_threads_if_sema_free()
+        to wake up possible hanging threads if
+        they are missed in mutex_signal_object. */ include/sync0sync.ic
+		
+
+-------------------------------------------------------------------------------------------
+/* The number of system calls made in this module. Intended for performance
+monitoring. */
+
+ulint   mutex_system_call_count         = 0;
+
+/* Number of spin waits on mutexes: for performance monitoring */
+
+/* round=one iteration of a spin loop */
+ulint   mutex_spin_round_count          = 0;
+ulint   mutex_spin_wait_count           = 0;
+ulint   mutex_os_wait_count             = 0;
+ulint   mutex_exit_count                = 0;
+           
+
+/* number of system calls made during shared latching */
+ulint   rw_s_system_call_count  = 0;
+
+/* number of spin waits on rw-latches,
+resulted during shared (read) locks */
+ulint   rw_s_spin_wait_count    = 0;
+
+/* number of OS waits on rw-latches,
+resulted during shared (read) locks */
+ulint   rw_s_os_wait_count      = 0;
+
+/* number of unlocks (that unlock shared locks),
+set only when UNIV_SYNC_PERF_STAT is defined */
+ulint   rw_s_exit_count         = 0;
+
+/* number of system calls made during exclusive latching */
+ulint   rw_x_system_call_count  = 0;
+
+/* number of spin waits on rw-latches,
+resulted during exclusive (write) locks */
+ulint   rw_x_spin_wait_count    = 0;
+
+/* number of OS waits on rw-latches,
+resulted during exclusive (write) locks */
+ulint   rw_x_os_wait_count      = 0;
+
+/* number of unlocks (that unlock exclusive locks),
+set only when UNIV_SYNC_PERF_STAT is defined */
+ulint   rw_x_exit_count         = 0;
+
+
+note:
+1. mutex_t:
+   mutex_system_call_count	:? 不是很清楚，可能是代码遗留下来的问题，因为sync系统修改过。       
+   mutex_spin_round_count	:表示mutex spin的次数。          
+   mutex_spin_wait_count	:表示mutex wait的次数。注意只在debug版本中有效，否则为0。         
+   mutex_os_wait_count		:表示mutex spin超时，放入mutex array中的次数。 
+								这里会出现mutex_os_wait_count+rw_s_os_wait_count+rw_x_os_wait_count < sync_primary_wait_array->res_count的情况:
+								是因为当把mutex加入array之后还有一次spin(4 loops)的机会,如果成功了就返回；不会增加mutex_os_wait_count。            
+   mutex_exit_count    		:表示mutex exit的次数。注意只在debug版本中有效，否则为0。           
+2. rw_lock_t:		
+   rw_s_system_call_count  
+   rw_s_spin_wait_count    
+   rw_s_os_wait_count      
+   rw_s_exit_count         
+   rw_x_system_call_count  
+   rw_x_spin_wait_count    
+   rw_x_os_wait_count      
+   rw_x_exit_count         
+   这些变量于上面的含义相同。不同的地方在于rw_s_spin_wait_count，rw_x_spin_wait_count不是在debug版本中才有效。

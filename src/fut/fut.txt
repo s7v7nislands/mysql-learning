@@ -1,0 +1,44 @@
+fut目录主要包含了对文件中页的链表相关操作。
+
+1. 链表中的页都是在同一个表空间，可以在不同的物理文件中。表示的是物理页的组织关系。
+2. 链表中的指针指向的是链表节点在文件页中的偏移。偏移可以是在同一个页中。
+3. 在实际操作中要通过innodb buffer来完成，所以要在buffer中缓存物理页，并进行相应的地址转换（物理地址和内存地址表示不同）。
+
+数据结构：
+
+typedef byte    flst_base_node_t;
+typedef byte    flst_node_t;
+表示在内存中的数据结构
+
+/* The physical size of a list base node in bytes */
+#define FLST_BASE_NODE_SIZE     (4 + 2 * FIL_ADDR_SIZE)
+
+/* The physical size of a list node in bytes */
+#define FLST_NODE_SIZE          (2 * FIL_ADDR_SIZE)
+表示在文件中链表字段的大小
+
+/* We define the field offsets of a node for the list */
+#define FLST_PREV       0       /* 6-byte address of the previous list element;
+                                the page part of address is FIL_NULL, if no
+                                previous element */
+#define FLST_NEXT       FIL_ADDR_SIZE   /* 6-byte address of the next
+                                list element; the page part of address
+                                is FIL_NULL, if no next element */
+
+/* We define the field offsets of a base node for the list */
+#define FLST_LEN        0       /* 32-bit list length field */
+#define FLST_FIRST      4       /* 6-byte address of the first element
+                                of the list; undefined if empty list */
+#define FLST_LAST       (4 + FIL_ADDR_SIZE) /* 6-byte address of the
+                                last element of the list; undefined
+                                if empty list */
+								
+以上为链表节点在文件中的表示。
+
+
+Q&A：
+1. Q: 在链表释放的时候是否会出现节点丢失的情况？
+   A: no, see fsp/* detail.
+
+2. Q: 在请求buffer中相应的页加的锁什么时候释放？
+   A: mtr_commit()

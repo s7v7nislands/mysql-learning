@@ -1,0 +1,177 @@
+/* Read view lists the trx ids of those transactions for which a consistent
+read should not see the modifications to the database. */
+
+struct read_view_struct{
+        ulint   type;           /* VIEW_NORMAL, VIEW_HIGH_GRANULARITY */
+        dulint  undo_no;        /* (0, 0) or if type is VIEW_HIGH_GRANULARITY
+                                transaction undo_no when this high-granularity
+                                consistent read view was created */
+        dulint  low_limit_no;   /* The view does not need to see the undo
+                                logs for transactions whose transaction number
+                                is strictly smaller (<) than this value: they
+                                can be removed in purge if not needed by other
+                                views */
+        dulint  low_limit_id;   /* The read should not see any transaction
+                                with trx id >= this value */
+        dulint  up_limit_id;    /* The read should see all trx ids which
+                                are strictly smaller (<) than this value */
+        ulint   n_trx_ids;      /* Number of cells in the trx_ids array */
+        dulint* trx_ids;        /* Additional trx ids which the read should
+                                not see: typically, these are the active
+                                transactions at the time when the read is
+                                serialized, except the reading transaction
+                                itself; the trx ids in this array are in a
+                                descending order */
+        dulint  creator_trx_id; /* trx id of creating transaction, or
+                                (0, 0) used in purge */
+        UT_LIST_NODE_T(read_view_t) view_list;
+                                /* List of read views in trx_sys */
+};
+
+note:
+1. 其中trx_ids保存着当前活动的trx，它们对read view不可见。
+2. 判断是否可见：
+	1，<up_limit_id, 可见。否则2
+	2，>=low_limit_id, 不可见，否则3
+	3，在trx_ids中，则不可见，否则可见。
+	
+<---------------------------------------low_limit_no--------------------
+	                   purge, can by removed                           |
+                                                                       |
+<----------------------                                                ------------------->
+                      |                                                |
+	  visual          |                  maybe visual                  |     unvisual
+-----------------------------------------------------------------------------------------
+                 up_limit_id           creator_trx_id             low_limit_id(max_trx_id) 
+
+/* Read view types */
+#define VIEW_NORMAL             1       /* Normal consistent read view
+                                        where transaction does not see changes
+                                        made by active transactions except
+                                        creating transaction. */
+#define VIEW_HIGH_GRANULARITY   2       /* High-granularity read view where
+                                        transaction does not see changes
+                                        made by active transactions and own
+                                        changes after a point in time when this
+                                        read view was created. */
+
+/* Implement InnoDB framework to support consistent read views in
+cursors. This struct holds both heap where consistent read view
+is allocated and pointer to a read view. */
+
+struct cursor_view_struct{
+        mem_heap_t*     heap;
+                                /* Memory heap for the cursor view */
+        read_view_t*    read_view;
+                                /* Consistent read view of the cursor*/
+        ulint           n_mysql_tables_in_use;
+                                /* number of Innobase tables used in the
+                                processing of this cursor */
+};
+
+
+/*
+-------------------------------------------------------------------------------
+FACT A: Cursor read view on a secondary index sees only committed versions
+-------
+of the records in the secondary index or those versions of rows created
+by transaction which created a cursor before cursor was created even
+if transaction which created the cursor has changed that clustered index page.
+
+PROOF: We must show that read goes always to the clustered index record
+to see that record is visible in the cursor read view. Consider e.g.
+following table and SQL-clauses:
+
+create table t1(a int not null, b int, primary key(a), index(b));
+insert into t1 values (1,1),(2,2);
+commit;
+
+Now consider that we have a cursor for a query
+
+select b from t1 where b >= 1;
+
+This query will use secondary key on the table t1. Now after the first fetch
+on this cursor if we do a update:
+
+update t1 set b = 5 where b = 2;
+
+Now second fetch of the cursor should not see record (2,5) instead it should
+see record (2,2).
+
+We also should show that if we have delete t1 where b = 5; we still
+can see record (2,2).
+
+When we access a secondary key record maximum transaction id is fetched
+from this record and this trx_id is compared to up_limit_id in the view.
+If trx_id in the record is greater or equal than up_limit_id in the view
+cluster record is accessed.  Because trx_id of the creating
+transaction is stored when this view was created to the list of
+trx_ids not seen by this read view previous version of the
+record is requested to be built. This is build using clustered record.
+If the secondary key record is delete  marked it's corresponding
+clustered record can be already be purged only if records
+trx_id < low_limit_no. Purge can't remove any record deleted by a
+transaction which was active when cursor was created. But, we still
+may have a deleted secondary key record but no clustered record. But,
+this is not a problem because this case is handled in
+row_sel_get_clust_rec() function which is called
+whenever we note that this read view does not see trx_id in the
+record. Thus, we see correct version. Q. E. D.
+
+-------------------------------------------------------------------------------
+FACT B: Cursor read view on a clustered index sees only committed versions
+-------
+of the records in the clustered index or those versions of rows created
+by transaction which created a cursor before cursor was created even
+if transaction which created the cursor has changed that clustered index page.
+
+PROOF:  Consider e.g.following table and SQL-clauses:
+
+create table t1(a int not null, b int, primary key(a));
+insert into t1 values (1),(2);
+commit;
+
+Now consider that we have a cursor for a query
+
+select a from t1 where a >= 1;
+
+This query will use clustered key on the table t1. Now after the first fetch
+on this cursor if we do a update:
+
+update t1 set a = 5 where a = 2;
+
+Now second fetch of the cursor should not see record (5) instead it should
+see record (2).
+
+We also should show that if we have execute delete t1 where a = 5; after
+the cursor is opened we still can see record (2).
+
+When accessing clustered record we always check if this read view sees
+trx_id stored to clustered record. By default we don't see any changes
+if record trx_id >= low_limit_id i.e. change was made transaction
+which started after transaction which created the cursor. If row
+was changed by the future transaction a previous version of the
+clustered record is created. Thus we see only committed version in
+this case. We see all changes made by committed transactions i.e.
+record trx_id < up_limit_id. In this case we don't need to do anything,
+we already see correct version of the record. We don't see any changes
+made by active transaction except creating transaction. We have stored
+trx_id of creating transaction to list of trx_ids when this view was
+created. Thus we can easily see if this record was changed by the
+creating transaction. Because we already have clustered record we can
+access roll_ptr. Using this roll_ptr we can fetch undo record.
+We can now check that undo_no of the undo record is less than undo_no of the
+trancaction which created a view when cursor was created. We see this
+clustered record only in case when record undo_no is less than undo_no
+in the view. If this is not true we build based on undo_rec previous
+version of the record. This record is found because purge can't remove
+records accessed by active transaction. Thus we see correct version. Q. E. D.
+-------------------------------------------------------------------------------
+FACT C: Purge does not remove any delete marked row that is visible
+-------
+to cursor view.
+
+TODO: proof this
+
+*/
+

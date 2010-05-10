@@ -1,0 +1,26 @@
+1.	innodb_tablespace_monitor
+================================================
+081104 16:45:48 INNODB TABLESPACE MONITOR OUTPUT
+================================================
+FILE SPACE INFO: id 0												//	FILE SPACE INFO: tablespace id
+size 640, free limit 320, free extents 2							//  size: 表空间的页数， free limit: 最大空闲的页数， free extents: 空闲extent数
+not full frag extents 1: used pages 52, full frag extents 0			//  not full frag extents, used pages: 部分空闲的extent数，在部分空闲的extent中使用了的页数， full frag extents: 全部使用的extent数
+first seg id not used 0 29											//  first seg id not used: 在表空间中，最小未使用的segment id。
+SEGMENT id 0 1 space 0; page 2; res 2 used 2; full ext 0			//  SEGMENT id: 段id， space,page: inode所在的表空间及页数。 res,used: 预留的页数及使用的页数。
+fragm pages 2; free extents 0; not full extents 0: pages 0			//	full ext: 全部使用的extent数， fragm pages: 单独分配的页数（最多32)。 
+SEGMENT id 0 2 space 0; page 2; res 1 used 1; full ext 0    		//  free extents: 全部空闲的extent数， not full extents,pages : 未全部使用的extent数，在部分空闲的extent中使用了的页数。
+fragm pages 1; free extents 0; not full extents 0: pages 0
+......
+......
+SEGMENT id 0 27 space 0; page 2; res 1 used 1; full ext 0
+fragm pages 1; free extents 0; not full extents 0: pages 0
+SEGMENT id 0 28 space 0; page 2; res 0 used 0; full ext 0
+fragm pages 0; free extents 0; not full extents 0: pages 0
+NUMBER of file segments: 28											//	NUMBER of file segments: tablespace中segment数。
+Validating tablespace												//  验证表空间有效
+Validation ok
+---------------------------------------
+END OF INNODB TABLESPACE MONITOR OUTPUT
+=======================================
+
+2.	innodb_table_monitor

@@ -1,0 +1,42 @@
+/** A block in a dynamically allocated array */
+typedef struct dyn_block_struct     dyn_block_t;
+/** Dynamically allocated array */
+typedef dyn_block_t         dyn_array_t;
+
+
+
+/* This is the initial 'payload' size of a dynamic array;
+this must be > MLOG_BUF_MARGIN + 30! */
+#define DYN_ARRAY_DATA_SIZE     512
+
+struct dyn_block_struct{
+        mem_heap_t*     heap;   /* in the first block this is != NULL
+                                if dynamic allocation has been needed */   
+        ulint           used;   /* number of data bytes used in this block */
+        byte            data[DYN_ARRAY_DATA_SIZE];
+                                /* storage for array elements */
+        UT_LIST_BASE_NODE_T(dyn_block_t) base;
+                                /* linear list of dyn blocks: this node is
+                                used only in the first block */
+        UT_LIST_NODE_T(dyn_block_t) list;
+                                /* linear list node: used in all blocks */
+#ifdef UNIV_DEBUG
+        ulint           buf_end;/* only in the debug version: if dyn array is
+                                opened, this is the buffer end offset, else
+                                this is 0 */
+        ulint           magic_n;
+#endif
+};
+
+
+#define DYN_BLOCK_MAGIC_N       375767
+#define DYN_BLOCK_FULL_FLAG     0x1000000UL    必须 > DYN_ARRAY_DATA_SIZE
+
+note:
+1. heap字段在最开始的时候为NULL,当动态数组中的第一次空间不够时，保存向mem_comm_pool申请的内存heap的指针。
+同时在原最后一个dyn_block中的used字段置上DYN_BLOCK_FULL_FLAG标志，（同时这个小技巧用于比较dyn_block是否已满，因为DYN_BLOCK_FULL_FLAG总是大于DYN_ARRAY_DATA_SIZE）
+2. 在函数实现时判断第一个dyn_block是否满足条件来优化程序结构。
+3. 在使用时除了dyn_push_string()函数的size可以大于DYN_ARRAY_DATA_SIZE，别的函数都不可以。mtr的log可以大于DYN_ARRAY_DATA_SIZE,memo总是保存着mtr_memo_slot_t.
+4. what about mem_heap_alloc() return null in dyn_array_add_block()?
+5. dyn_array_t only used in mtr
+

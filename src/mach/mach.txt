@@ -1,0 +1,11 @@
+/*************************************************************
+Writes a ulint in a compressed form where the first byte codes the
+length of the stored ulint. We look at the most significant bits of
+the byte. If the most significant bit is zero, it means 1-byte storage,
+else if the 2nd bit is 0, it means 2-byte storage, else if 3rd is 0,
+it means 3-byte storage, else if 4th is 0, it means 4-byte storage,
+else the storage is 5-byte. */
+
+note：
+1. 主要用于转换平台无关的存储格式。
+2. 其中有些函数用压缩算法来减小存储空间。

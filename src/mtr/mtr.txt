@@ -1,0 +1,74 @@
+1. memo保存着savepoint的锁类型和object对象指针。
+2. log中保存着事物中的日志，不同的操作有不同的日志格式。
+	日志格式：
+			initial log records ：每条记录的头信息。大小在1+(2-10)之间。1表示type，(2-10)表示压缩的(space,page)。
+			body                ：不同的记录的具体内容。
+						(offset, len, value): 其中的len为(1-8)大小的长度有type中指出，所以这里会省略。
+						(offset, value): 当 type = MLOG_1BYTE, MLOG_2BYTE, MLOG_4BYTE, MLOG_8BYTE 时
+						(index, other):  当 index为old时，index不存在，other有type指定。
+										 当 index为new时，index格式为(n_fields, n_uniqs, len_0_fields, ... , len_n-1_fields), other有type指定。
+
+数据结构：
+
+
+/* Logging modes for a mini-transaction */
+#define MTR_LOG_ALL     21  /* default mode: log all operations
+                    modifying disk-based data */
+#define MTR_LOG_NONE        22  /* log no operations */
+/*#define   MTR_LOG_SPACE   23 */   /* log only operations modifying
+                    file space page allocation data
+                    (operations in fsp0fsp.* ) */
+#define MTR_LOG_SHORT_INSERTS   24  /* inserts are logged in a shorter
+                    form */
+
+/* Types for the mlock objects to store in the mtr memo; NOTE that the
+first 3 values must be RW_S_LATCH, RW_X_LATCH, RW_NO_LATCH */
+#define MTR_MEMO_PAGE_S_FIX RW_S_LATCH
+#define MTR_MEMO_PAGE_X_FIX RW_X_LATCH
+#define MTR_MEMO_BUF_FIX    RW_NO_LATCH  	// above latches are used for buffer pool page
+#define MTR_MEMO_MODIFY     54				// used in debug version, We now assume that all x-latched pages have been modified!
+#define MTR_MEMO_S_LOCK     55				
+#define MTR_MEMO_X_LOCK     56				// these latches are used for rw_lock
+
+note：
+1. 在前3种表示了对拥有锁的对象加的锁类型，同时保存拥有锁的对象；后3种表示对锁加的锁类型，同时保存锁本身。
+
+
+/* Type definition of a mini-transaction memo stack slot. */
+typedef struct mtr_memo_slot_struct     mtr_memo_slot_t;
+struct mtr_memo_slot_struct{
+        ulint   type;   /* type of the stored object (MTR_MEMO_S_LOCK, ...) */
+        void*   object; /* pointer to the object */   // 可以是page 和 rw_lock
+};
+
+/* Mini-transaction handle and buffer */
+struct mtr_struct{
+        ulint           state;  /* MTR_ACTIVE, MTR_COMMITTING, MTR_COMMITTED */
+        dyn_array_t     memo;   /* memo stack for locks etc. */
+        dyn_array_t     log;    /* mini-transaction log */
+        ibool           modifications;
+                                /* TRUE if the mtr made modifications to
+                                buffer pool pages */ 		// 调用mlog_open()时，设置成true
+        ulint           n_log_recs;
+                                /* count of how many page initial log records
+                                have been written to the mtr log */
+        ulint           log_mode; /* specifies which operations should be
+                                logged; default value MTR_LOG_ALL */
+        dulint          start_lsn;/* start lsn of the possible log entry for
+                                this mtr */
+        dulint          end_lsn;/* end lsn of the possible log entry for
+                                this mtr */
+        ulint           magic_n;
+};
+
+1. state字段的含义： MTR_ACTIVE, 表示mtr_t已经初始化。
+					 MTR_COMMITTING, 表示在commit过程中。
+					 MTR_COMMITTED, 表示commit结束。
+	后面2种只在debug版本中出现。
+	
+2. n_log_recs字段：	表示日志记录数。
+3. 这里的log是redo log。
+4. 在mtr_commit()中会写log文件。
+
+
+
