@@ -103,13 +103,13 @@ class Fil(object):
         print 'prev page no  : ', self.prev
         print 'next page no  : ', self.next
         print 'page lsn      : ', self.lsn
-        print 'page  type    : ', 
+        print 'page  type    : ',
         for k in PAGE_TYPE:
             if k == self.type:
                 print PAGE_TYPE[k]
-                find = True
-        if not find:
-            print 'UNKNOW'
+                break
+        else:
+            print 'UNKNOW: %d' % self.type
         print 'file lsn      : ', self.flsn
         print 'space id      : ', self.sid
         print 'old checksum  : ', self.oldsum
@@ -124,7 +124,7 @@ class Extent(object):
             raise Exception
         self.data = data[XDES_ARR_OFFSET:10240+XDES_ARR_OFFSET]
 
-        self.ext = [] 
+        self.ext = []
         self.tmp = {}
         for i in range(XDES_ARR_SIZE/XDES_SIZE):
             self.tmp['xdes_id']         = tonum(self.data, i*XDES_SIZE+0, i*XDES_SIZE+8)
@@ -142,7 +142,7 @@ class Extent(object):
         for i in range(XDES_ARR_SIZE/XDES_SIZE):
             if self.ext[i]['flst_node_next'] == 0x000000000000:
                 continue
-            print 'xdes it          :', self.ext[i]['xdes_id']
+            print 'segment id       :', self.ext[i]['xdes_id']
             print 'node offset page :', 150 + i*XDES_SIZE + 8, ',extent no', i
             print 'flst node prev   :', self.ext[i]['flst_node_prev'] >> 16, self.ext[i]['flst_node_prev'] & 0x00000000FFFF
             print 'flst node next   :', self.ext[i]['flst_node_next'] >> 16, self.ext[i]['flst_node_next'] & 0x00000000FFFF
@@ -157,11 +157,11 @@ class Extent(object):
                 print 'extent belongs to segment'
             else:
                 print 'UNKNOWN XDES TYPE' 
-            print 'xdes bitmaps     : free_bit clean_bit' , 
+            print 'xdes bitmaps     : free_bit clean_bit' ,
             bits = tobin(self.ext[i]['bitmaps'])
             for i in range(0, len(bits), 2):
                 if not (i % 16):
-                    print "\n                  ", 
+                    print "\n                  ",
                 print '%d%d' % (bits[i], bits[i+1]),
             print
         print '-------- END EXTENT DESCRIPTOR --------'

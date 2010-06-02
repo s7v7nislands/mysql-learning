@@ -11,7 +11,9 @@ PAGE_TYPE = {
         7     : 'Transaction system data',
         8     : 'File space header',
         9     : 'Extent descriptor page',
-        10    : 'Uncompressed BLOB page'}
+        10    : 'Uncompressed BLOB page',
+        11    : 'First compressed BLOB page',
+        12    : 'First compressed BLOB page'}
 
 #page size = 16k
 PAGE_SIZE = 16 * 1024
