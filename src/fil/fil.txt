@@ -171,4 +171,6 @@ notes:
 4.	当要进行recover时，服务器才尝试打开所有的tablespace，一般不打开所有的tablespace。 	
 
 5.  FIL_PAGE_FILE_FLUSH_LSN, only in system tablespace.
+
+6.  FIL_PAGE_INODE : information about segment page.
 	
