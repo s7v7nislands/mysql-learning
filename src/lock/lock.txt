@@ -1,0 +1,5 @@
+note:
+1. can improve function lock_number_of_rows_lock()
+    add new field, so need't trans the n_bits
+
+2.

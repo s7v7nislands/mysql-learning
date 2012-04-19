@@ -53,6 +53,10 @@ struct fil_node_struct {
     ulint           magic_n;                /* #define FIL_NODE_MAGIC_N    89389 */
 };
 
+note:
+    1. why when modification_counter == flush_counter, n_pending_flushes may
+    be not zero?
+    2. fil_write_flushed_lsn_to_data_files 可以优化吗？ 直接跳出循环
 
 /* Tablespace or log data space: let us call them by a common name space */
 struct fil_space_struct {
@@ -173,4 +177,5 @@ notes:
 5.  FIL_PAGE_FILE_FLUSH_LSN, only in system tablespace.
 
 6.  FIL_PAGE_INODE : information about segment page.
-	
+
+7.  在lru中，有的是open的，有的是close的。 n_open, open_max表示打开的文件，和最大的打开文件数。

@@ -38,5 +38,8 @@ note:
 2. 在函数实现时判断第一个dyn_block是否满足条件来优化程序结构。
 3. 在使用时除了dyn_push_string()函数的size可以大于DYN_ARRAY_DATA_SIZE，别的函数都不可以。mtr的log可以大于DYN_ARRAY_DATA_SIZE,memo总是保存着mtr_memo_slot_t.
 4. what about mem_heap_alloc() return null in dyn_array_add_block()?
-5. dyn_array_t only used in mtr
-
+    allocated storage, NULL if did not succeed (only possible for MEM_HEAP_BTR_SEARCH type heaps)
+5. dyn_array_t only used in mtr log
+6.
+dyn_array_push,dyn_array_open可以优化成取得最后一个block后在判断吗？还是这里就是做了优化，当array只有一个block的时候。
+note2

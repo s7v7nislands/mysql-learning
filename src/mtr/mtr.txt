@@ -5,8 +5,12 @@
 			body                ：不同的记录的具体内容。
 						(offset, len, value): 其中的len为(1-8)大小的长度有type中指出，所以这里会省略。
 						(offset, value): 当 type = MLOG_1BYTE, MLOG_2BYTE, MLOG_4BYTE, MLOG_8BYTE 时
-						(index, other):  当 index为old时，index不存在，other有type指定。
-										 当 index为new时，index格式为(n_fields, n_uniqs, len_0_fields, ... , len_n-1_fields), other有type指定。
+						(index, other):  当 index为new时，index不存在，other有type指定。
+										 当
+                                         index为old时，index格式为(n_fields,
+                                         n_uniqs, len_0_fields, ... ,
+                                         len_n-1_fields),
+                                         other有type指定。len_x_fields不仅仅包括长度，还包括别的属性。比如null，varlength
 
 数据结构：
 
@@ -66,9 +70,11 @@ struct mtr_struct{
 					 MTR_COMMITTED, 表示commit结束。
 	后面2种只在debug版本中出现。
 	
-2. n_log_recs字段：	表示日志记录数。
+2. n_log_recs字段：
+表示日志记录数。用来判断是不是多条log。如果是多条，在后面加MLOG_MULTI_REC_END
 3. 这里的log是redo log。
-4. 在mtr_commit()中会写log文件。
+4. 在mtr_commit()中会写redo log buffer(log_sys),
+然后把修改过的page加入到flush链表。
 
 
 
