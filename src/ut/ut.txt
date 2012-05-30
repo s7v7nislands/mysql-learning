@@ -51,7 +51,8 @@ note：
 2.在vector中(*data)的内存有调用者自己负责释放。
 3.当vector自动增大的时候，不释放旧的内存区域。到释放vector结构时，一起释放heap。
 4.vector的resize算法是 new_total = old_total * 2.
-5.在pars/pars0pars.c中使用
+5.在pars/pars0pars.c, trx/trx0trx.c, lock/lock0lock.c中使用
+6.内存管理基于mem_heap
 
 -----------------------
 3. sort utility. 宏定义
@@ -84,7 +85,6 @@ note：
 1.采用二分法来排序。
 2.宏展开是一个函数体。SORT_FUN用于函数的嵌套调用，CMP_FUN用于排序比较，比较的范围[LOW,HIGH).
 3.详细用法见 ut_dulint_sort()函数
-4.未使用
 
 
 ---------------
@@ -166,10 +166,11 @@ with malloc */
 UT_LIST_BASE_NODE_T(ut_mem_block_t)   ut_mem_block_list;
 
 note:
-1. 所以innodb的内存分配都在这些函数之上。（不包括large page，这种情况下是通过shm_* 来实现的）
+1. 所以innodb的内存分配都在这些函数之上。（不包括large
+page，这种情况下是通过mmap或shm_* 来实现的）
 2. ut_mem_block_struct的size包括请求的内存大小+ut_mem_block_struct结构体本身大小。
 3. ut_total_allocated_memory = sum(each(ut_mem_block_list).size)
-
+4. srv_use_sys_malloc为TRUE的时候，效率是不是更高？因为避免使用ut_list_mutex
 
 
 -------------------------------------
@@ -201,6 +202,7 @@ note：
 8. rand
 note：
 1. 一些产生随机数的函数
+2. 生成fold，用于hash函数
 
 --------------------------------------
 9. byte
@@ -211,3 +213,11 @@ note：
 10. ut
 note:
 1. 定义了一些常用的函数。
+
+11. bh
+note:
+1. Binary min-heap implementation.
+
+12. rbt
+note:
+1. 红黑树的实现
