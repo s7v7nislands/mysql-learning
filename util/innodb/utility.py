@@ -5,7 +5,7 @@ def tonum(data, start, end):
     num = 0
     for i in data[start:end]:
         n = ord(i)
-        num <<= 8 
+        num <<= 8
         num += n
 
     return num

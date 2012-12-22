@@ -2,19 +2,19 @@
 
 class Record(object):
     def __init__(self):
-	    pass
+        pass
 
     def is_new(self):
-	    pass
+        pass
 
     def show(self):
-	    pass
+        pass
 
     def show_old(self):
-	    pass
+        pass
 
     def show_new(self):
-	    pass
+        pass
 
 
 
@@ -30,15 +30,14 @@ if __name__ == '__main__':
     prompt = 'page [0 - %d]: ' % (size-1)
     off = raw_input(prompt)
     try:
-      	off = int(off) 
+        off = int(off)
     except Exception,a:
-	continue
+        continue
     f.seek(off*PAGE_SIZE)
     data = f.read(PAGE_SIZE)
 
     npage = Page(data)
     npage.show()
-	
+
     print '\n-------------------------------------\n\n'
 
-    
