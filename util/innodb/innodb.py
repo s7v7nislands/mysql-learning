@@ -49,7 +49,7 @@ class Fsp(object):
         print 'not use                          :', self.not_use
         print 'space size (pages)               :', self.size
         print 'free pages limit                 :', self.free_limit
-        print 'lowest pages no write            :', self.lowest_no_write
+        print 'lowest pages no write(xxx: flags)     :', self.lowest_no_write
         print 'partial extent list used pages   :', self.frag_n_used
 
         print 'free extent list length          :', self.free_cnt
@@ -113,7 +113,7 @@ class Fil(object):
                 break
         else:
             print 'UNKNOW: %d' % self.type
-        print 'file lsn      : ', self.flsn
+        print 'global lsn    : ', self.flsn
         print 'space id      : ', self.sid
         print 'old checksum  : ', self.oldsum
         print 'log sequence  : ', self.olsn
@@ -153,13 +153,13 @@ class Extent(object):
             if self.ext[i]['xdes_status'] == XDES_FREE:
                 print 'free extent in space list'
             elif self.ext[i]['xdes_status'] == XDES_FREE_FRAG:
-                print 'partial free extent in space list'
+                print 'partial frag extent in space list'
             elif self.ext[i]['xdes_status'] == XDES_FULL_FRAG:
-                print 'full extent in space list'
+                print 'full frag extent in space list'
             elif self.ext[i]['xdes_status'] == XDES_FSEG:
                 print 'extent belongs to segment'
             else:
-                print 'UNKNOWN XDES TYPE'
+                raise ValueError('UNKNOWN XDES TYPE')
             print 'xdes bitmaps     : free_bit clean_bit' ,
             bits = tobin(self.ext[i]['bitmaps'])
             for i in range(0, len(bits), 2):
@@ -198,8 +198,10 @@ class Seg_inode(object):
 
     def show(self):
         print '-------- SEGMENT INODE -------'
-        print 'segment inodes prev:', self.seg_inodes_prev >> 16, self.seg_inodes_prev & 0x00000000FFFF
-        print 'segment inodes next:', self.seg_inodes_next >> 16, self.seg_inodes_next & 0x00000000FFFF
+        print 'segment inodes per page      :', FSP_SEG_INODES_PER_PAGE
+        print 'segment inodes page prev     :', self.seg_inodes_prev >> 16, self.seg_inodes_prev & 0x00000000FFFF
+        print 'segment inodes page next     :', self.seg_inodes_next >> 16, self.seg_inodes_next & 0x00000000FFFF
+        print
         for i in range(FSEG_INODE_PAGE_NODE):
             if self.seg[i]['fseg_id'] == 0:
                 continue
@@ -432,11 +434,11 @@ class Dict(object):
         print 'lastest table id      : ', tonum(self.data, 8, 16)
         print 'lastest index id      : ', tonum(self.data, 16, 24)
         print 'lastest max id        : ', tonum(self.data, 24, 32), 'Obsolete, always DICT_HDR_FIRST_ID = 10'
-        print 'lastest table root    : ', tonum(self.data, 32, 36)
-        print 'lastest table id root : ', tonum(self.data, 36, 40)
-        print 'lastest column id     : ', tonum(self.data, 40, 44)
-        print 'lastest index id      : ', tonum(self.data, 44, 48)
-        print 'lastest field id      : ', tonum(self.data, 48, 52)
+        print 'table root            : ', tonum(self.data, 32, 36)
+        print 'root of table id      : ', tonum(self.data, 36, 40)
+        print 'root of column id     : ', tonum(self.data, 40, 44)
+        print 'root of index id      : ', tonum(self.data, 44, 48)
+        print 'root of field id      : ', tonum(self.data, 48, 52)
         print 'dict header seg space : ', tonum(self.data, 56, 60)
         print 'dict header seg page  : ', tonum(self.data, 60, 64)
         print 'dict header seg offset: ', tonum(self.data, 64, 66)
