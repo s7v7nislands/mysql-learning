@@ -261,6 +261,11 @@ struct dict_table_struct{
 #endif /* UNIV_DEBUG */
 };
 
+
+notes:
+1. n_def: 表示目前已经往table中添加的col
+2. n_cols: 表示这个表总共定义的col数量，包括了DATA_N_SYS_COLS
+
 include/dict0dict.h
 内存中系统目录结构
 /* Dictionary system struct */
@@ -341,6 +346,11 @@ system table table structure:
 
 note:
 1. the system table record format is old, not impact.
+2. table load到内存的时候，才会给table加上系统列。dict_table_add_system_columns()
+3. index也是，在load到内存的时候会再次修改. 之前只有定义的索引列。dict_index_build_internal_clust(),dict_index_build_internal_non_clust()
+4. dict_index_build_node_ptr()构造内部节点
+   
+
 
 
 

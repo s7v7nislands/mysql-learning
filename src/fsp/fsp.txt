@@ -21,7 +21,8 @@ descriptor page, but used only in the first. */
 #define FSP_NOT_USED            4   /* this field contained a value up to which we know that the modifications in the database have been flushed to the file space; not used now */
 #define FSP_SIZE                8   /* Current size of the space in pages */
 #define FSP_FREE_LIMIT          12  /* Minimum page number for which the free list has not been initialized: the pages >= this limit are, by definition, free; note that in a single-table tablespace where size < 64 pages, this number is 64, i.e., we have initialized the space about the first extent, but have not physically allocted those pages to the file */
-#define FSP_LOWEST_NO_WRITE     16  /* The lowest page offset for which the page has not been written to disk (if it has been written, we know that the OS has really reserved the physical space for the page) */
+#define FSP_LOWEST_NO_WRITE     16  /*已经不使用*/ /* The lowest page offset for which the page has not been written to disk (if it has been written, we know that the OS has really reserved the physical space for the page) */
+#define FSP_SPACE_FLAGS         16  /* fsp_space_t.flags, similar to dict_table_t::flags */
 #define FSP_FRAG_N_USED         20  /* number of used pages in the FSP_FREE_FRAG list */
 #define FSP_FREE                24  /* list of free extents */
 #define FSP_FREE_FRAG           (24 + FLST_BASE_NODE_SIZE)      /* list of partially free extents not belonging to any segment */
@@ -35,6 +36,11 @@ descriptor page, but used only in the first. */
 #define FSP_HEADER_SIZE     (32 + 5 * FLST_BASE_NODE_SIZE)
 
 #define FSP_FREE_ADD        4   /* this many free extents are added to the free list from above FSP_FREE_LIMIT at a time */                    
+
+
+Notes:
+1. FSP_LOWEST_NO_WRITE 被FSP_SPACE_FLAGS取代了
+2. FSP_SIZE 是真正使用的，不是物理文件大小(当space 0是autoextend的时候可能不一样大)
 
 
 /*          FILE SEGMENT INODE
@@ -112,6 +118,11 @@ the extent are free and which contain old tuple version to clean. */
 #define XDES_ARR_OFFSET     (FSP_HEADER_OFFSET + FSP_HEADER_SIZE)
 
 
+Notes:
+1. xdes_is_free() 函数是否可以优化? 同理xdes_is_full()
+   直接用bit函数()来计算,避免现在的循环计算
+2. xdes page每UNIV_PAGE_SIZE个就有。其实第0个页面的类型也是，不过它又刚好是fsp
+
 
 include/fsp0fsp.h
 
@@ -152,18 +163,11 @@ Notes:
     1. In system tablespace, the 0-7 pages is special. other tablespace just 0-2 pages.
     2. the fsp header only be used in 0th page in tablespace,  but repeated every XDES_DESCRIBED_PER_PAGE pages in every tablespace.
     3. extend descriptors are repeated every XDES_DESCRIBED_PER_PAGE pages in every tablespace.
-    4. pages allacate from fragment extent or full extent.
-    5. segment and extent are different, segment is used to manage data , and extent is used to manage pages in tablespace. 
-    6. fseg_create()用于创建系统用的segment。	
-	7. FSP_IBUF_HEADER_PAGE_NO，之所以要使用单独的一页，是因为避免加锁。
+    4. segment and extent are different, segment is used to manage data , and extent is used to manage pages in tablespace. 
+    5. fseg_create()用于创建系统用的segment。	
+	6. FSP_IBUF_HEADER_PAGE_NO，之所以要使用单独的一页，是因为避免加锁。
+    7. first 32 pages allacate from fragment extent, then from full extent.
 	8. 要注意page分配的不同方式。
 
    
 
-
-
-
-
-
-
-    

@@ -115,10 +115,10 @@ the corresponding canonical strings have the same property. */
 OLD STYLE OFFSET ARRAY:
 uint offsets[]
 offsets[0] = n_alloc        // the size of the array
-offsets[1] = n_fields       // field number of the table
+offsets[1] = n_fields       // field number of the index in this rec
 
 rec_offs_base(offsets) = offsets + 2
-rec_offs_base(offsets)[0] = REC_N_OLD_EXTRA_BYTES + fields  // REC_N_OLD_EXTRA_BYTES = 6, include field offset.
+rec_offs_base(offsets)[0] = REC_N_OLD_EXTRA_BYTES + offset fields  // REC_N_OLD_EXTRA_BYTES = 6, include field offset.
 
 rec_offs_base(offsets)[1] = offset of field[0]      // 31 bit: IS_NULL, 30 bit: IS_STORED_EXTERNAL
          ...
@@ -131,10 +131,12 @@ rec_offs_base(offsets)[n_fields] = offset of field[n_fields-1]
 NEW STYLE OFFSET ARRAY:
 uint offsets[]
 offsets[0] = n_alloc        // the size of the array
-offsets[1] = n_fields       // field number of the table
+offsets[1] = n_fields       // field number of the index in this rec
 
 rec_offs_base(offsets) = offsets + 2
-rec_offs_base(offsets)[0] = size of extra record header + fields | REC_OFFS_COMPACT   // include field offset and null bits
+rec_offs_base(offsets)[0] = size of extra record header + offset + nullable
+fields | REC_OFFS_COMPACT | REC_OFFS_EXTERNAL   // include field offset and
+null bits, REC_OFFS_EXTERNAL 只有在leaf中才可能有
 
 rec_offs_base(offsets)[1] = offset of field[0]      // 31 bit: IS_NULL, 30 bit: IS_STORED_EXTERNAL
          ...
@@ -145,10 +147,20 @@ rec_offs_base(offsets)[n_fields] = offset of field[n_fields-1]
 
 
 note:
-1. the record format of no leaf node and leaf node are different. in no leaf node ,these haven't the transaction id and rollback pointer. and the record type
-   is  node pointer.
+1. the record format of no leaf node and leaf node are different. 
+   in no leaf node: uniq fields + node pointer.
+   in leaf node: uniq fields + all other fields
 
 2. the no leaf node have a bit mark predefined minimum record in alphabetical order.
+3. B-tree node pointers must not contain externally stored columns.  Thus the "e" flag must be 0.
+   在old格式中没有说明到底允不允许。见rec_init_offsets()
+
+4. old格式可以从rec直接构造出来offsets,new格式需要dict_index_t才能构造。
+5. new格式中nullable字段可以没有。这里nulls的-1，在没有nullable的时候不会运行到。
+6. old格式中fixed的field的null的filed用\x00来填充
+7. comp格式的rec对不同的status(REC_STATUS_*)有不同的处理, 内部节点dict_index_get_n_unique_in_tree(index) + 1
+8. comp格式中2字节的offset，低在前，高在后(LLHH)
+9. rec_t表示物理记录，dtuple_t表示解析后的记录
 
 
 

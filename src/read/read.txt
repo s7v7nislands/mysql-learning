@@ -35,14 +35,14 @@ note:
 	2，>=low_limit_id, 不可见，否则3
 	3，在trx_ids中，则不可见，否则可见。
 	
-<---------------------------------------low_limit_no--------------------
-	                   purge, can by removed                           |
-                                                                       |
-<----------------------                                                ------------------->
-                      |                                                |
-	  visual          |                  maybe visual                  |     unvisual
------------------------------------------------------------------------------------------
-                 up_limit_id           creator_trx_id             low_limit_id(max_trx_id) 
+<----------low_limit_no--------------
+	       purge, can by removed    |
+                                    |
+<----------------------             |                    ------------------->
+                      |             |                    |
+	  visual          |             |     maybe visual   |     unvisual     |
+-------------------------------------------------------------------------------------------
+                 up_limit_id    min_active_trx    low_limit_id(max_trx_id) creator_trx_id
 
 /* Read view types */
 #define VIEW_NORMAL             1       /* Normal consistent read view
