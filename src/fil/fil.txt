@@ -56,7 +56,9 @@ struct fil_node_struct {
 note:
     1. why when modification_counter == flush_counter, n_pending_flushes may
     be not zero?
+    n_pending_flushes是在flush函数里先设置的，那时候没没判断它们是否相等。
     2. fil_write_flushed_lsn_to_data_files 可以优化吗？ 直接跳出循环
+    系统表空间的每个文件都要写的
 
 /* Tablespace or log data space: let us call them by a common name space */
 struct fil_space_struct {
@@ -166,7 +168,7 @@ struct fil_addr_struct{
 
 notes:
 1. 	fil_system变量保存了系统的所以已经打开的tablespace. 通过hash列表可以找到所以的tablespace。
-	同时保存了lru，unflushed列表。
+	同时保存了lru(fil_node_t)，unflushed(fil_space_t)列表。
 	
 2.	log ，system tablespace不在lru列表中，他们一直保持打开直到服务器关闭。
 
@@ -178,4 +180,11 @@ notes:
 
 6.  FIL_PAGE_INODE : information about segment page.
 
-7.  在lru中，有的是open的，有的是close的。 n_open, open_max表示打开的文件，和最大的打开文件数。
+7.  在lru中，可能是open的,也可能是close的。 n_open, open_max表示打开的文件，和最大的打开文件数。
+
+8.  node->open在fil_node_open_file()中才会设置
+
+9.  fil_mutex_enter_and_prepare_for_io():
+没有打开space的打开，已经打开的保证可以使用（space不在rename中）
+
+10. fil_node_prepare_io(), fil_node_complete_io(): 打开文件，移出lru

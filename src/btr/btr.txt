@@ -1,5 +1,60 @@
 innodb b-tree struct
 
+/*
+Latching strategy of the InnoDB B-tree
+--------------------------------------
+A tree latch protects all non-leaf nodes of the tree. Each node of a tree
+also has a latch of its own.
+
+A B-tree operation normally first acquires an S-latch on the tree. It
+searches down the tree and releases the tree latch when it has the
+leaf node latch. To save CPU time we do not acquire any latch on
+non-leaf nodes of the tree during a search, those pages are only bufferfixed.
+
+If an operation needs to restructure the tree, it acquires an X-latch on
+the tree before searching to a leaf node. If it needs, for example, to
+split a leaf,
+(1) InnoDB decides the split point in the leaf,
+(2) allocates a new page,
+(3) inserts the appropriate node pointer to the first non-leaf level,
+(4) releases the tree X-latch,
+(5) and then moves records from the leaf to the new allocated page.
+
+Node pointers
+-------------
+Leaf pages of a B-tree contain the index records stored in the
+tree. On levels n > 0 we store 'node pointers' to pages on level
+n - 1. For each page there is exactly one node pointer stored:
+thus the our tree is an ordinary B-tree, not a B-link tree.                                                                                            
+
+A node pointer contains a prefix P of an index record. The prefix
+is long enough so that it determines an index record uniquely.
+The file page number of the child page is added as the last
+field. To the child page we can store node pointers or index records
+which are >= P in the alphabetical order, but < P1 if there is
+a next node pointer on the level, and P1 is its prefix.                                                                                                
+
+If a node pointer with a prefix P points to a non-leaf child,
+then the leftmost record in the child must have the same
+prefix P. If it points to a leaf node, the child is not required
+to contain any record with a prefix equal to P. The leaf case
+is decided this way to allow arbitrary deletions in a leaf node
+without touching upper levels of the tree.
+
+We have predefined a special minimum record which we
+define as the smallest record in any alphabetical order.
+A minimum record is denoted by setting a bit in the record
+header. A minimum record acts as the prefix of a node pointer
+which points to a leftmost node on any level of the tree.
+
+File page allocation
+--------------------
+In the root node of a B-tree there are two file segment headers.
+The leaf pages of a tree are allocated from one file segment, to
+make them consecutive on disk if possible. From the other file segment
+we allocate pages for the non-leaf levels of the tree.
+*/
+
 
 
 

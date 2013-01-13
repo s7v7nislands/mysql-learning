@@ -250,6 +250,7 @@ class Page(object):
 
         self.slots          = self.data[-2*self.dir_slots:]
 
+
     def show(self):
         print '-------- PAGE HEADER --------'
         print 'dirctory slot number         :', self.dir_slots
@@ -275,6 +276,39 @@ class Page(object):
             print 'slot pointer   :', tonum(self.slots, len(self.slots)-2*(i+1), len(self.slots)-2*i)
         print '-------- END PAGE HEADER --------'
 
+class RecOld(object):
+
+    def __init__(self, data, pos):
+        self.data = data
+        self.pos = pos
+
+        extra = tonum(self.data, self.pos-6, self.pos)
+        self.next_rec        = (extra & 0x00000000ffff)
+        self.onebyte         = (extra & 0x000000010000) >> 16
+        self.fields          = (extra & 0x000007fe0000) >> 17
+        self.order_nums      = (extra & 0x00fff8000000) >> 27
+        self.rec_nums        = (extra & 0x0f0000000000) >> 40
+        self.delete          = (extra & 0xf00000000000) >> 44
+
+        offsets = tonum(self.data, self.pos-6-((1 if self.onebyte else 2) * self.fields), self.pos-6)
+        print bin(offsets)
+        self.offsets = []
+        for x in range(self.fields):
+            off = (offsets & ((0xff if self.onebyte else 0xffff) << (x*8) )) >> (x*8)
+            self.offsets.append(off)
+
+    def show(self):
+        print 'next rec:', self.next_rec
+        print '1byte:', self.onebyte
+        print 'fields:', self.fields
+        print 'order nums:', self.order_nums
+        print 'rec  nums:',  self.rec_nums
+        print 'delete mark:', self.delete
+        print 'offsets', self.offsets
+        print '-' * 48
+
+
+        return self.next_rec
 
 class Ibuf(object):
     def __init__(self, data):
@@ -503,3 +537,13 @@ class Undo(object):
         self.show_undo_hdr()
 
 
+if __name__ == '__main__':
+    f = file('/Users/bing/gentoo/var/lib/mysql/test/test_innodb.ibd', 'r')
+    f.seek(16*1024*3)
+    data = f.read(16*1024)
+    page = Page(data)
+    page.show()
+    pos = PAGE_OLD_INFIMUM
+    for x in range(page.heap_cnt):
+        rec = RecOld(data, pos)
+        pos = rec.show()

@@ -598,3 +598,7 @@ mapped to it. When we create the buffer pool, we map the first elements
 in the free list to the frames.
 5) When we have AWE enabled, we disable adaptive hash indexes.
 */
+
+
+notes:
+1. buf_block_t -> buf_page_t -> frame
